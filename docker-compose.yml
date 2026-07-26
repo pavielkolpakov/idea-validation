@@ -1,0 +1,22 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: ideacheck-db
+    environment:
+      POSTGRES_USER: ideacheck
+      POSTGRES_PASSWORD: ideacheck
+      POSTGRES_DB: ideacheck
+    # 5433 on the host: 5432 is commonly taken by a local Homebrew Postgres,
+    # which otherwise silently shadows this container on localhost.
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ideacheck -d ideacheck"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
