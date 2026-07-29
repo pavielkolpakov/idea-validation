@@ -22,6 +22,8 @@ Target user: solo founders and indie hackers deciding whether to build.
 | Execution | FastAPI `BackgroundTasks` + LangGraph Postgres checkpointer | No new vendor; checkpointer makes a crashed run resumable instead of re-burning 4 Perplexity calls |
 | Execution upgrade path | Postgres-as-queue (procrastinate/pgqueuer) | Same DB, no Redis. The semaphore is the seam it replaces |
 | Observability | LangSmith tracing from day 1 | Replay a misbehaving fan-out visually, without adopting the LangGraph Platform runtime |
+| Python version | 3.14 | Full suite verified on 3.14 (incl. PEP 649 lazy annotations vs SQLAlchemy `Mapped[]`). Longer support runway than 3.12 and matches the dev machine's system Python. Not chosen for speed — the workload is IO-bound |
+| TypeScript version | Stay on 5.x | TS 7.0.2 works for `tsc` but **typescript-eslint refuses it outright** and Next needs `experimental.useTypeScriptCli`. Revisit when typescript-eslint ships TS 7 support — that's the gating dependency |
 
 ### Implementation (settled in the Phase 1 grilling)
 | Decision | Choice | Rationale |
@@ -131,7 +133,7 @@ Key points:
 ### Phase 1 — Foundation ✅ complete
 - [x] Repo scaffold: `web/`, `api/`, root `docker-compose.yml`, `Makefile`, `.env.example`.
 - [x] docker-compose: `pgvector/pgvector:pg17`, named volume, **host port 5433**.
-- [x] `api/` via `uv`, Python 3.12. FastAPI + async SQLAlchemy + Alembic + LangGraph.
+- [x] `api/` via `uv`, **Python 3.14**. FastAPI + async SQLAlchemy + Alembic + LangGraph.
 - [x] SQLAlchemy models for all six tables; bigint identity PKs, nullable `vector(1536)` columns, no HNSW indexes.
 - [x] Alembic migration 1: `CREATE EXTENSION vector`, `CREATE SCHEMA langgraph`, all tables, `CHECK` on `reports.status`, unique on `public_slug` and `entities.domain`.
 - [x] `alembic/env.py`: `include_object` hook excluding non-`public` schemas.
