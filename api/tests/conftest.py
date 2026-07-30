@@ -21,6 +21,8 @@ TEST_SQLALCHEMY_URL = f"postgresql+psycopg://ideacheck:ideacheck@localhost:5433/
 
 # Must be set before any app module reads settings.
 os.environ["DATABASE_URL"] = TEST_SQLALCHEMY_URL
+# Retry behaviour is under test; the backoff sleeps are not.
+os.environ["RESEARCH_RETRY_BASE_DELAY_S"] = "0"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -44,10 +46,29 @@ def test_database() -> None:
 
 
 @pytest.fixture
-async def client(test_database) -> AsyncIterator:
+def research_client():
+    from app.clients.fakes import FakeResearchClient
+
+    return FakeResearchClient()
+
+
+@pytest.fixture
+def judge():
+    from app.clients.fakes import FakeJudge
+
+    return FakeJudge()
+
+
+@pytest.fixture
+async def client(test_database, research_client, judge, monkeypatch) -> AsyncIterator:
     import httpx
 
     from app.main import app
+
+    # The real clients construct eagerly at startup and need live API keys, so
+    # the default suite swaps them here. Postgres stays real — that convention
+    # was about the database, where the risk actually lives.
+    monkeypatch.setattr("app.main.build_clients", lambda: (research_client, judge))
 
     # ASGITransport does not run lifespan events, and lifespan is where the
     # checkpointer and graph are built — so drive it explicitly.

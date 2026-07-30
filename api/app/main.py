@@ -7,6 +7,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from app.clients import build_clients
 from app.config import get_settings
 from app.graph.build import build_graph
 from app.routers import reports
@@ -39,7 +40,8 @@ async def lifespan(app: FastAPI):
     checkpointer = AsyncPostgresSaver(pool)
     await checkpointer.setup()  # idempotent
 
-    set_graph(build_graph(checkpointer))
+    research_client, judge = build_clients()
+    set_graph(build_graph(checkpointer, research_client, judge))
     app.state.pool = pool
     try:
         yield

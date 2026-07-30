@@ -13,7 +13,8 @@ from sqlalchemy import update
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import Report
+from app.graph.nodes.prompts import RESEARCH_AGENTS
+from app.models import Report, ResearchChunk
 
 log = logging.getLogger(__name__)
 _settings = get_settings()
@@ -44,6 +45,33 @@ async def _patch(report_id: int, **fields) -> None:
         await session.commit()
 
 
+async def _write_chunks(report_id: int, dossiers: list[dict]) -> None:
+    """Persist raw dossiers into the corpus.
+
+    Runs after the report row is written, and swallows its own errors: a corpus
+    write must never cost the user their report. Embeddings arrive in Phase 3 —
+    the rows are written now because backfilling text is easy and backfilling a
+    run that was never recorded is impossible.
+    """
+    try:
+        async with SessionLocal() as session:
+            for dossier in dossiers:
+                if not (dossier.get("text") or "").strip():
+                    continue
+                session.add(
+                    ResearchChunk(
+                        report_id=report_id,
+                        agent=dossier["agent"],
+                        text=dossier["text"],
+                        citations=dossier.get("citations") or [],
+                        source="web",
+                    )
+                )
+            await session.commit()
+    except Exception:  # noqa: BLE001 — corpus writes are best-effort
+        log.exception("corpus write failed for report %s", report_id)
+
+
 async def run_report(report_id: int, idea: str, target_user: str | None) -> None:
     async with _semaphore:
         try:
@@ -56,11 +84,22 @@ async def run_report(report_id: int, idea: str, target_user: str | None) -> None
             state = {"report_id": report_id, "idea": idea, "target_user": target_user}
 
             final: dict = {}
+            # Research nodes announce completion; the runner aggregates into a
+            # count. Four concurrent nodes each writing their own step string
+            # would make progress appear to jump around and go backwards.
+            done: set[str] = set()
+
             async for mode, chunk in graph.astream(
                 state, config=config, stream_mode=["custom", "values"]
             ):
-                if mode == "custom" and isinstance(chunk, dict) and "step" in chunk:
-                    await _patch(report_id, step=chunk["step"])
+                if mode == "custom" and isinstance(chunk, dict):
+                    if "agent_done" in chunk:
+                        done.add(chunk["agent_done"])
+                        await _patch(
+                            report_id, step=f"researching ({len(done)}/{len(RESEARCH_AGENTS)})"
+                        )
+                    elif "step" in chunk:
+                        await _patch(report_id, step=chunk["step"])
                 elif mode == "values":
                     final = chunk
 
@@ -70,7 +109,9 @@ async def run_report(report_id: int, idea: str, target_user: str | None) -> None
                 step=None,
                 report=final.get("report"),
                 score=final.get("score"),
+                dossiers_raw={"dossiers": final.get("dossiers") or []},
             )
+            await _write_chunks(report_id, final.get("dossiers") or [])
         except Exception as exc:  # noqa: BLE001 — must never escape into BackgroundTasks
             log.exception("report %s failed", report_id)
             await _patch(

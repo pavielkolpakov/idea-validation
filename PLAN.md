@@ -44,8 +44,8 @@ Target user: solo founders and indie hackers deciding whether to build.
 ## Still Open
 - **Hosting provider** — deferrable; local docker-compose unblocks Phases 1-3.
 - **Auth provider** — decide in Phase 4 when org/social-login needs are known.
-- Judge model tier (`claude-opus-5` vs `claude-sonnet-5`) — default Opus, A/B on the golden set.
-- Research topology: fixed 4 sub-agents vs planner-driven `Send` fan-out — default fixed 4.
+- Judge model tier (`claude-opus-5` vs `claude-sonnet-5`) — shipped as Opus via `JUDGE_MODEL`; A/B on the golden set.
+- Research topology: fixed 4 sub-agents vs planner-driven `Send` fan-out — shipped fixed 4.
 
 ## MVP Features
 - Idea input: freeform text (~1500 char cap), optional target-user field.
@@ -56,7 +56,7 @@ Target user: solo founders and indie hackers deciding whether to build.
   4. **Graveyard** — who tried this and died, and why.
 - Judge pass: Claude reads all four dossiers + the idea, emits a structured report.
 - Ingest: every run writes ideas / entities / research chunks with embeddings.
-- Report page: score, subscores (novelty, market size, competitive intensity, timing, feasibility), competitor table, 3-5 risks, 3-5 differentiation angles, citations throughout.
+- Report page: score, subscores (novelty, market size, competitive **headroom**, timing, feasibility — all higher-is-better), competitor table, 3-5 risks, 3-5 differentiation angles, citations throughout.
 - Accounts + history, shareable public link per report.
 - Free quota per account.
 
@@ -87,22 +87,18 @@ Target user: solo founders and indie hackers deciding whether to build.
                           ┌─────────┐
                           │  judge  │  Claude + structured output
                           └────┬────┘
-                               ▼
-                          ┌─────────┐
-                          │ persist │  report row → status=succeeded
-                          └────┬────┘
-                               ▼
-                          ┌─────────┐
-                          │ ingest  │  embeddings → corpus (errors swallowed)
-                          └────┬────┘
                               END
 ```
 
+The runner (not a graph node) then writes the report row, `dossiers_raw`, and the corpus chunks.
+
 Key points:
 - Four research nodes are separate graph nodes with static edges from START, not one node doing `asyncio.gather` — that's what lets the checkpointer resume a partial run, and what lets the planner-driven `Send` variant drop in later without restructuring.
-- `dossiers` needs `Annotated[list, operator.add]`. Without the reducer, the last research node to finish overwrites the other three.
-- Each research node gets a `RetryPolicy` — Perplexity timeouts are transient.
-- `persist` runs before `ingest` so a corpus-write failure can never cost the user their report. `ingest` swallows its own errors and logs.
+- `dossiers` and `degraded_agents` need `Annotated[list, operator.add]`. Without the reducer, the last research node to finish overwrites the other three.
+- **Amended in Phase 2: there is no `persist` node.** The original design had one, which contradicts the standing invariant that graph nodes never touch the database — the invariant is why nodes stay testable without a DB and why the stream is a clean SSE seam in Phase 4. The runner already did this work, so `persist` bought nothing.
+  - *Known limitation this leaves open:* with persistence outside the graph, a process crash between the judge finishing and the runner's write leaves paid-for judge output sitting in the checkpoint with no path back into `reports`. Nothing triggers a resume today, so an in-graph `persist` would buy a guarantee we have no mechanism to collect on. Revisit if a resume endpoint is ever built.
+- **Amended in Phase 2: retry is not a node-level `RetryPolicy`.** Research nodes swallow their own exceptions to keep the run alive, so they never raise — and a `RetryPolicy` on a node that never raises never fires. Retry sits inside the node, underneath the fail-soft catch.
+- Corpus writes run last and swallow their own errors, so a corpus failure can never cost the user their report — the guarantee the original `persist → ingest` ordering was reaching for.
 - `thread_id` = the report's ID. One thread per report; that's what makes a crashed run resumable.
 - **Later (not V1):** a `retrieve_prior` node hangs off START alongside the research nodes, contributing a separately-labeled dossier so the judge can weigh our own prior findings against today's web results.
 
@@ -154,11 +150,26 @@ Key points:
 - **Checkpointer schema set via connection `search_path`**, since `AsyncPostgresSaver` exposes no `schema` parameter.
 - Next 16 ships an `AGENTS.md` warning its conventions differ from older versions; its bundled docs were consulted before writing the page.
 
-### Phase 2 — Pipeline
-- [ ] Perplexity client (retry, timeout, citation extraction).
-- [ ] Four research node prompts; replace the stub with the real fan-out + reducer.
-- [ ] Judge prompt + Pydantic report schema, structured output.
-- [ ] `persist` node; real failure handling and `step` reporting.
+### Phase 2 — Pipeline ✅ complete
+- [x] Perplexity client via `langchain-perplexity` (dedicated semaphore, timeout, citation extraction).
+- [x] Four research node prompts; stub replaced with the real fan-out + reducers.
+- [x] Judge prompt + Pydantic report schema via `langchain-anthropic` structured output.
+- [x] Real failure handling (fail-soft research, all-empty floor) and aggregated `step` reporting.
+- [x] `research_chunks` written per run with `embedding` NULL — corpus accumulation starts now.
+- [x] Injected clients + fake-driven test suite; opt-in `make test-live` against the real APIs.
+
+**Decisions and deviations, and why**
+- **`langchain-perplexity` + `langchain-anthropic`**, not raw HTTP — free LangSmith spans, which was a day-1 decision.
+- **Dossiers are flat prose + citations**, matching the `research_chunks` column shape exactly, so Phase 3 ingest is a loop with no transformation. Resolves the open chunking question below.
+- **Research is fail-soft**; the judge raises only if all four dossiers are empty. `degraded_agents` in the report JSON keeps a thin report from being presented as a complete one. Consequence: `status="succeeded"` no longer means "all four researchers ran" — that fact lives in the JSON, because `status` is about the pipeline and `degraded_agents` is about the content.
+- **Citations are integer indices into a code-built table, never URLs from the model.** An LLM asked for source URLs invents plausible ones, attached to factual claims about real companies. An out-of-range index fails validation instead of shipping.
+- **The score is computed from subscores, not emitted by the judge** — see the weights in `app/graph/schema.py`. Makes the scale comparable across runs and lets Phase 4 re-score history from stored subscores at zero API spend.
+- **`competitive_intensity` → `competitive_headroom`.** Every subscore must be higher-is-better or the weighted mean is silently wrong; a prompt sentence is not strong enough to hold that.
+- **A separate `PERPLEXITY_CONCURRENCY`**, because `MAX_CONCURRENT_RUNS=5` now implies up to 20 concurrent Sonar requests. Report concurrency and vendor concurrency are different concerns.
+- **Perplexity citation shape verified against a live `sonar-pro` response.** Citations arrive on `additional_kwargs` (both `citations` and `search_results`), *not* `response_metadata` — which carries only `model_name` and `search_context_size`. `make test-live` keeps this honest; treat a citation failure there as the contract having moved.
+- **`search_context_size` comes back `low`** (the LangChain wrapper's default). Research depth is currently on its weakest setting — an untuned quality lever, not a decision.
+- **LangSmith tracing verified end to end**: all 8 spans (4 research + judge chain/LLM/parser) close with outputs. Two bugs had to be fixed first, both silent: `.env` was never exported to `os.environ` (so tracing was simply off), and the `perplexityai` SDK's unbuilt `APIPublicSearchResult` schema broke LangSmith serialization, leaving every `ChatPerplexity` span `pending` forever. See `api/CLAUDE.md` → Gotchas.
+- **Frontend untouched.** The report page remains Phase 4.
 
 ### Phase 3 — Corpus ingest
 - [ ] OpenAI embedding client (batched).
@@ -175,7 +186,9 @@ Key points:
 - [ ] Golden-set eval: ~15 ideas with known outcomes, check score ordering is sane.
 
 ## Open Questions
-- Sonar tier: `sonar` vs `sonar-pro`.
-- Chunking strategy for `research_chunks`: whole sub-agent answer as one row, or split per claim? Per-claim is better for retrieval, more rows, needs a splitter.
+- ~~Sonar tier: `sonar` vs `sonar-pro`.~~ **Resolved (Phase 2): `sonar-pro`**, config-driven via `SONAR_MODEL`. Developing against the cheap tier can't distinguish "the idea doesn't work" from "the research was underpowered"; downgrading later is a `.env` edit. Revisit per-node tiers once real outputs have been read.
+- ~~Chunking strategy for `research_chunks`.~~ **Resolved (Phase 2): whole sub-agent answer as one row.** Matches the dossier shape, so no splitter and no transformation. Per-claim splitting stays available later, when retrieval quality can actually be measured.
+- Judge model tier — defaulted to `claude-opus-5`; still wants the Phase 4 golden-set A/B against `claude-sonnet-5`. Config flip, no code change.
 - When retrieval turns on: HNSW parameters, and how to stop the corpus echoing itself beyond the `source` column.
 - Idempotency on duplicate idea submissions — needs a content hash and a "you already ran this" UX.
+- Score weights are a first guess (`SCORE_WEIGHTS`). Retune against the Phase 4 golden set; historical reports can be re-scored from stored subscores for free.

@@ -7,9 +7,9 @@ from typing_extensions import TypedDict
 class ReportState(TypedDict, total=False):
     """Shared state for a single report run.
 
-    `dossiers` carries the `operator.add` reducer from day one even though Phase 1
-    has a single node: in Phase 2 four research nodes write to it concurrently, and
-    without the reducer the last one to finish silently overwrites the other three.
+    `dossiers` and `degraded_agents` both carry `operator.add`: four research
+    nodes write to them concurrently, and without the reducer the last one to
+    finish silently overwrites the other three.
     """
 
     report_id: int
@@ -17,5 +17,8 @@ class ReportState(TypedDict, total=False):
     target_user: str | None
 
     dossiers: Annotated[list[dict], operator.add]
+    degraded_agents: Annotated[list[str], operator.add]
+
+    citations: list[str]
     report: dict
     score: int

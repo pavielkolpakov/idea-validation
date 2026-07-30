@@ -1,4 +1,4 @@
-.PHONY: up down logs migrate revision api web test fmt reset
+.PHONY: up down logs migrate revision api web test test-live fmt reset
 
 up:
 	docker compose up -d
@@ -31,7 +31,12 @@ web:
 	cd web && npm run dev
 
 test:
-	cd api && uv run pytest -q
+	cd api && uv run pytest -q -m "not live"
+
+# Hits the real Perplexity + Anthropic APIs and costs money. This is what
+# verifies the citation shape the fakes only assume — run before shipping.
+test-live:
+	cd api && uv run pytest -q -m live -s
 
 fmt:
 	cd api && uv run ruff check --fix . && uv run ruff format .

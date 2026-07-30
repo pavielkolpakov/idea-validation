@@ -13,10 +13,11 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 | `app/schemas.py` | Request/response models; idea length bounds live here |
 | `app/auth.py` | **Placeholder.** `X-Debug-User` header → get-or-create `users` row. Phase 4 replaces this file wholesale |
 | `app/routers/reports.py` | `POST /reports` (202), `GET /reports/{public_slug}`, slug generation |
-| `app/runner.py` | Semaphore-bounded background execution, status transitions, graph streaming |
+| `app/runner.py` | Semaphore-bounded background execution, status transitions, graph streaming, corpus writes |
+| `app/clients/` | Perplexity + Anthropic clients behind protocols, plus the fakes the default suite runs on |
 | `app/graph/` | The LangGraph pipeline — see `app/graph/CLAUDE.md` |
 | `alembic/` | Migrations. `env.py` carries the `include_object` hook |
-| `tests/` | Integration tests against a real Postgres; no mocks |
+| `tests/` | Integration tests against a real Postgres. Real DB, fake model providers |
 
 ## Conventions
 
@@ -24,6 +25,8 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 - **`sqlalchemy[asyncio]`**, not plain `sqlalchemy` — the extra pulls `greenlet`, without which async connect fails at runtime.
 - **Short-lived sessions in background work.** `runner._patch` opens a session per write rather than holding one across a 90s run; otherwise `max_concurrent_runs` runs exhaust the pool.
 - **Nothing may escape into `BackgroundTasks`** — an exception there vanishes silently. `run_report` catches everything and records `status="failed"` with the error text.
+- **Model providers are injected, not imported.** `build_graph` takes a `ResearchClient` and a `JudgeClient`; `app/clients/build_clients()` constructs the real ones and is the single seam tests monkeypatch. Adding a provider means adding a protocol here, not reaching for it inside a node.
+- **Corpus writes are best-effort and always last.** `runner._write_chunks` runs after the report row is committed and swallows its own errors: a corpus failure must never cost the user their report.
 - Line length 100, ruff with `E,F,I,UP,B`.
 
 ## Gotchas
@@ -38,3 +41,16 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 ## Testing
 
 `make test` creates and migrates `ideacheck_test`, so **migrations are exercised on every run**. Tests drive the app through `httpx.ASGITransport` and explicitly enter `app.router.lifespan_context` — ASGITransport does not run lifespan events, and lifespan is where the graph is built.
+
+**Real Postgres, fake model providers.** The "no mocks" convention was about the database, where Phase 1's risk lived; it still holds. Paid third-party HTTP is a different category — `conftest` monkeypatches `app.main.build_clients` to return `FakeResearchClient` / `FakeJudge`. That is also the only way to reach the behaviours that matter most: one researcher down, all four down, a judge citing a source that doesn't exist.
+
+**`make test-live`** (`-m live`) runs the same pipeline against the real APIs. It costs money and is deselected by default. It exists to catch the fakes lying — specifically `extract_citations`, whose shape is currently an assumption. Run it before shipping.
+
+## Gotchas (Phase 2)
+
+- **`.env` is not the process environment.** pydantic-settings parses `api/.env` into the `Settings` object and stops; nothing lands in `os.environ`. Any library that reads `os.environ` directly sees an empty environment. `app/config.py::load_env_file` exports the file at import time to fix this — **real env vars still win**, so conftest's `DATABASE_URL` and any explicit `export` are never clobbered. This trap bit twice before being fixed: LangSmith tracing was silently off with every key correctly set, and the live test suite skipped itself while checking `os.environ` for keys that only existed in the file. If you add a setting that a third-party SDK reads from the environment, it must go through here.
+- **The `perplexityai` SDK breaks LangSmith serialization.** `APIPublicSearchResult` ships with `__pydantic_complete__ = False` and a `MockValSer`, so LangSmith's `on_llm_end` raises while serializing it — and langchain-core swallows that into a log warning. Symptom: tracing appears enabled but every `ChatPerplexity` span sits at `status=pending` with no outputs, while `ChatAnthropic` traces fine. `repair_search_result_schema()` in `app/clients/perplexity.py` forces `model_rebuild`; it runs when the client is constructed. Remove it only after confirming upstream ships a built schema.
+- **`search_results` items are SDK objects, not dicts.** Gating on `isinstance(r, dict)` silently matches nothing. `extract_citations` accepts both shapes; the flat `citations` list is the fallback.
+- **`ASGITransport` awaits `BackgroundTasks` inside the POST**, so a report is already finished when the response returns. Tests that need to observe intermediate `step` values must poll concurrently with the request, not after it.
+- **A LangGraph `RetryPolicy` on a research node would be dead config**, because those nodes swallow their own exceptions and never raise. Retry lives inside the node. See `app/graph/CLAUDE.md`.
+- **`PERPLEXITY_CONCURRENCY` is not `MAX_CONCURRENT_RUNS`.** One run makes four Sonar calls, so 5 concurrent runs would mean 20 concurrent vendor requests. They are separate settings on purpose; don't collapse them.
