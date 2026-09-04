@@ -171,11 +171,19 @@ Key points:
 - **LangSmith tracing verified end to end**: all 8 spans (4 research + judge chain/LLM/parser) close with outputs. Two bugs had to be fixed first, both silent: `.env` was never exported to `os.environ` (so tracing was simply off), and the `perplexityai` SDK's unbuilt `APIPublicSearchResult` schema broke LangSmith serialization, leaving every `ChatPerplexity` span `pending` forever. See `api/CLAUDE.md` → Gotchas.
 - **Frontend untouched.** The report page remains Phase 4.
 
-### Phase 3 — Corpus ingest
-- [ ] OpenAI embedding client (batched).
-- [ ] `ingest` node: ideas + entities (domain upsert) + chunks.
-- [ ] Backfill script for reports produced before ingest landed.
-- [ ] Corpus stats endpoint — proves the asset is accumulating.
+### Phase 3 — Corpus ingest ✅ complete
+- [x] OpenAI embedding client (batched; one call per run via `langchain-openai`).
+- [x] Ingest: ideas + entities (domain upsert) + chunks, all embedded.
+- [x] Backfill script for reports produced before ingest landed (`make backfill`).
+- [x] Corpus stats endpoint (`GET /corpus/stats`) — proves the asset is accumulating.
+
+**Decisions and deviations, and why**
+- **Ingest lives in the runner, not a graph node.** The Phase 2 amendment that dropped `persist` applies unchanged: nodes never touch the database, and the runner already owned `_write_chunks`. `app/corpus.py::ingest_run` is that function grown into full ingest — same best-effort swallow, same "after the report row commits" ordering.
+- **`langchain-openai`**, matching the Phase 2 provider decision (free LangSmith spans). One batched `aembed_documents` call per run covers idea + entities + chunks (~10 texts).
+- **A missing `OPENAI_API_KEY` is not fatal.** Unlike the research/judge keys, embeddings feed a corpus that is best-effort by invariant: `build_embedder()` returns `None` with a startup warning, and rows land with NULL embeddings (the columns are nullable for exactly this). An embedding *failure* mid-run degrades the same way — rows still written, vectors lost, backfillable.
+- **Entity upsert dedupes within the batch first.** Postgres `ON CONFLICT` cannot touch the same row twice in one statement, and the judge can name a company in two dossiers. Domain-less competitors are plain inserts — no dedup story until embedding-similarity merge exists.
+- **Repeat sightings refresh, never erase.** The upsert's `ON CONFLICT` clause bumps `seen_count`/`last_verified_at` and only overwrites `description`/`funding_stage`/`embedding` when the new value is non-NULL.
+- **Backfill is a one-shot migration, not a cron job.** Re-running it against an already-ingested report inflates `seen_count`; that is documented in `app/scripts/backfill.py` rather than defended against with a marker column.
 
 ### Phase 4 — Product surface
 - [ ] Auth provider decision + integration; `X-Debug-User` removed.

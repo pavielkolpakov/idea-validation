@@ -8,16 +8,20 @@ category and is substitutable here.
 eagerly at app startup and would need live API keys otherwise.
 """
 
+from app.clients.embeddings import EmbeddingClient, OpenAIEmbedder
 from app.clients.judge import AnthropicJudge, JudgeClient
 from app.clients.perplexity import Dossier, PerplexityClient, ResearchClient
 
 __all__ = [
     "AnthropicJudge",
     "Dossier",
+    "EmbeddingClient",
     "JudgeClient",
+    "OpenAIEmbedder",
     "PerplexityClient",
     "ResearchClient",
     "build_clients",
+    "build_embedder",
 ]
 
 
@@ -48,3 +52,23 @@ def build_clients() -> tuple[ResearchClient, JudgeClient]:
         )
 
     return PerplexityClient(), AnthropicJudge()
+
+
+def build_embedder() -> EmbeddingClient | None:
+    """Construct the embedding client, or None when unconfigured.
+
+    Unlike `build_clients`, a missing key is not fatal: embeddings feed the
+    write-only corpus, whose writes are best-effort by invariant. With no key,
+    ingest writes rows with NULL embeddings and a startup warning says so.
+    Tests monkeypatch this seam to a fake, as with `build_clients`.
+    """
+    import logging
+
+    from app.config import get_settings
+
+    if not get_settings().openai_api_key.strip():
+        logging.getLogger(__name__).warning(
+            "OPENAI_API_KEY is not set; corpus rows will be written without embeddings"
+        )
+        return None
+    return OpenAIEmbedder()

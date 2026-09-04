@@ -7,6 +7,8 @@ is not possible on demand.
 """
 
 import asyncio
+import hashlib
+import random
 
 from app.clients.perplexity import Dossier
 from app.graph.schema import Competitor, DifferentiationAngle, JudgeReport, Risk, Subscores
@@ -45,10 +47,13 @@ class FakeResearchClient:
 
 
 class FakeJudge:
-    """Emits a valid report. `source_index` is overridable to test the citation backstop."""
+    """Emits a valid report. `source_index` and `domain` are overridable for tests."""
 
-    def __init__(self, source_index: int = 0) -> None:
+    def __init__(self, source_index: int = 0, domain: str = "example.com") -> None:
         self.source_index = source_index
+        # Configurable so corpus tests can use a unique domain per test — the
+        # test DB is session-scoped and entities accumulate across tests.
+        self.domain = domain
         self.prompts: list[str] = []
 
     async def judge(self, system: str, prompt: str) -> JudgeReport:
@@ -65,7 +70,7 @@ class FakeJudge:
             competitors=[
                 Competitor(
                     name="Example Corp",
-                    domain="example.com",
+                    domain=self.domain,
                     what_they_do="Does roughly this, for a different segment.",
                     funding_stage="series-a",
                     sources=[self.source_index],
@@ -76,3 +81,26 @@ class FakeJudge:
                 DifferentiationAngle(text="Target the underserved low end.", sources=[])
             ],
         )
+
+
+class FakeEmbeddingClient:
+    """Deterministic vectors seeded from the text hash; `fail=True` to test the NULL path."""
+
+    DIM = 1536
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.batches: list[list[str]] = []
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if self.fail:
+            raise RuntimeError("simulated embedding failure")
+        self.batches.append(list(texts))
+        return [self._vector(t) for t in texts]
+
+    def _vector(self, text: str) -> list[float]:
+        # Deterministic per text, so a re-embedded row gets the same vector and
+        # upsert tests don't need to compare floats.
+        seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "big")
+        rng = random.Random(seed)
+        return [rng.uniform(-1, 1) for _ in range(self.DIM)]

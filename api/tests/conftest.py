@@ -60,7 +60,14 @@ def judge():
 
 
 @pytest.fixture
-async def client(test_database, research_client, judge, monkeypatch) -> AsyncIterator:
+def embedder():
+    from app.clients.fakes import FakeEmbeddingClient
+
+    return FakeEmbeddingClient()
+
+
+@pytest.fixture
+async def client(test_database, research_client, judge, embedder, monkeypatch) -> AsyncIterator:
     import httpx
 
     from app.main import app
@@ -69,6 +76,9 @@ async def client(test_database, research_client, judge, monkeypatch) -> AsyncIte
     # the default suite swaps them here. Postgres stays real — that convention
     # was about the database, where the risk actually lives.
     monkeypatch.setattr("app.main.build_clients", lambda: (research_client, judge))
+    # Same seam for the embedder; set `embedder.fail = True` to exercise the
+    # NULL-embedding path.
+    monkeypatch.setattr("app.main.build_embedder", lambda: embedder)
 
     # ASGITransport does not run lifespan events, and lifespan is where the
     # checkpointer and graph are built — so drive it explicitly.

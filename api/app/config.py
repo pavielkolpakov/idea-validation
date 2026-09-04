@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     perplexity_api_key: str = ""
     anthropic_api_key: str = ""
 
+    # Deliberately NOT fail-fast like the two keys above: embeddings feed the
+    # write-only corpus, and corpus writes are best-effort by invariant. A
+    # missing key means rows land with NULL embeddings (the columns are nullable
+    # for exactly this) and a warning at startup — never a dead app.
+    openai_api_key: str = ""
+    embedding_model: str = "text-embedding-3-small"
+
     sonar_model: str = "sonar-pro"
     judge_model: str = "claude-opus-5"
 

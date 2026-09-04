@@ -12,15 +12,17 @@ import logging
 from sqlalchemy import update
 
 from app.config import get_settings
+from app.corpus import ingest_run
 from app.db import SessionLocal
 from app.graph.nodes.prompts import RESEARCH_AGENTS
-from app.models import Report, ResearchChunk
+from app.models import Report
 
 log = logging.getLogger(__name__)
 _settings = get_settings()
 
 _semaphore = asyncio.Semaphore(_settings.max_concurrent_runs)
 _graph = None
+_embedder = None
 
 
 def set_graph(graph) -> None:
@@ -34,6 +36,11 @@ def get_graph():
     return _graph
 
 
+def set_embedder(embedder) -> None:
+    global _embedder
+    _embedder = embedder
+
+
 async def _patch(report_id: int, **fields) -> None:
     """Short-lived session per write.
 
@@ -45,34 +52,33 @@ async def _patch(report_id: int, **fields) -> None:
         await session.commit()
 
 
-async def _write_chunks(report_id: int, dossiers: list[dict]) -> None:
-    """Persist raw dossiers into the corpus.
+async def _ingest(
+    report_id: int, idea_id: int, idea: str, dossiers: list[dict], report: dict | None
+) -> None:
+    """Embed and persist the run into the corpus (ideas / entities / chunks).
 
     Runs after the report row is written, and swallows its own errors: a corpus
-    write must never cost the user their report. Embeddings arrive in Phase 3 —
-    the rows are written now because backfilling text is easy and backfilling a
-    run that was never recorded is impossible.
+    write must never cost the user their report. An embedding failure degrades
+    to NULL embeddings — the columns are nullable for exactly this — with the
+    rows still written, because backfilling an embedding is easy and
+    backfilling a run that was never recorded is impossible.
     """
     try:
         async with SessionLocal() as session:
-            for dossier in dossiers:
-                if not (dossier.get("text") or "").strip():
-                    continue
-                session.add(
-                    ResearchChunk(
-                        report_id=report_id,
-                        agent=dossier["agent"],
-                        text=dossier["text"],
-                        citations=dossier.get("citations") or [],
-                        source="web",
-                    )
-                )
-            await session.commit()
+            await ingest_run(
+                session,
+                _embedder,
+                report_id=report_id,
+                idea_id=idea_id,
+                idea_text=idea,
+                dossiers=dossiers,
+                report=report,
+            )
     except Exception:  # noqa: BLE001 — corpus writes are best-effort
-        log.exception("corpus write failed for report %s", report_id)
+        log.exception("corpus ingest failed for report %s", report_id)
 
 
-async def run_report(report_id: int, idea: str, target_user: str | None) -> None:
+async def run_report(report_id: int, idea_id: int, idea: str, target_user: str | None) -> None:
     async with _semaphore:
         try:
             await _patch(report_id, status="running", step="starting")
@@ -111,7 +117,9 @@ async def run_report(report_id: int, idea: str, target_user: str | None) -> None
                 score=final.get("score"),
                 dossiers_raw={"dossiers": final.get("dossiers") or []},
             )
-            await _write_chunks(report_id, final.get("dossiers") or [])
+            await _ingest(
+                report_id, idea_id, idea, final.get("dossiers") or [], final.get("report")
+            )
         except Exception as exc:  # noqa: BLE001 — must never escape into BackgroundTasks
             log.exception("report %s failed", report_id)
             await _patch(

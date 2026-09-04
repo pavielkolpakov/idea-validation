@@ -20,11 +20,7 @@ async def _poll_until_terminal(client, slug: str, timeout: float = 30.0) -> dict
 
 
 async def _chunks_for(report_id: int) -> list[dict]:
-    """Read corpus rows directly.
-
-    The corpus is write-only in V1, so there is no public interface to assert
-    through yet — the stats endpoint arrives in Phase 3.
-    """
+    """Read corpus rows directly; the stats endpoint only exposes aggregates."""
     from sqlalchemy import select
 
     from app.db import SessionLocal
@@ -181,11 +177,7 @@ async def test_citations_are_indices_not_urls(client, judge):
 
 
 async def test_successful_run_writes_corpus_chunks(client, research_client):
-    """Every run feeds the corpus, even though V1 never reads from it.
-
-    Written now with embeddings NULL because backfilling text is easy and
-    backfilling a run that was never recorded is impossible.
-    """
+    """Every run feeds the corpus, even though V1 never reads from it."""
     resp = await client.post("/reports", json={"idea": IDEA}, headers={"X-Debug-User": "test"})
     body = await _poll_until_terminal(client, resp.json()["public_slug"])
     assert body["status"] == "succeeded", body.get("error")
@@ -199,7 +191,7 @@ async def test_successful_run_writes_corpus_chunks(client, research_client):
     rows = await _chunks_for(body["id"])
     assert sorted(r["agent"] for r in rows) == sorted(_AGENTS)
     assert all(r["source"] == "web" for r in rows)
-    assert all(r["embedding"] is None for r in rows)
+    assert all(r["embedding"] is not None for r in rows)
     assert all(len(r["citations"]) == 2 for r in rows)
 
 

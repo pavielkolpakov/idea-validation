@@ -44,7 +44,7 @@ async def create_report(
     await db.commit()
     await db.refresh(report)
 
-    background.add_task(run_report, report.id, payload.idea, payload.target_user)
+    background.add_task(run_report, report.id, idea.id, payload.idea, payload.target_user)
 
     return CreateReportResponse(id=report.id, public_slug=report.public_slug, status=report.status)
 

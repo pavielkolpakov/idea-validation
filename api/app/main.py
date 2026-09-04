@@ -7,11 +7,11 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from app.clients import build_clients
+from app.clients import build_clients, build_embedder
 from app.config import get_settings
 from app.graph.build import build_graph
-from app.routers import reports
-from app.runner import set_graph
+from app.routers import corpus, reports
+from app.runner import set_embedder, set_graph
 
 logging.basicConfig(level=logging.INFO)
 settings = get_settings()
@@ -42,6 +42,8 @@ async def lifespan(app: FastAPI):
 
     research_client, judge = build_clients()
     set_graph(build_graph(checkpointer, research_client, judge))
+    # None when OPENAI_API_KEY is unset: ingest then writes NULL embeddings.
+    set_embedder(build_embedder())
     app.state.pool = pool
     try:
         yield
@@ -61,6 +63,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(reports.router)
+    app.include_router(corpus.router)
 
     @app.get("/health")
     async def health() -> dict:

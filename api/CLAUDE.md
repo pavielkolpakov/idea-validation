@@ -13,8 +13,11 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 | `app/schemas.py` | Request/response models; idea length bounds live here |
 | `app/auth.py` | **Placeholder.** `X-Debug-User` header → get-or-create `users` row. Phase 4 replaces this file wholesale |
 | `app/routers/reports.py` | `POST /reports` (202), `GET /reports/{public_slug}`, slug generation |
-| `app/runner.py` | Semaphore-bounded background execution, status transitions, graph streaming, corpus writes |
-| `app/clients/` | Perplexity + Anthropic clients behind protocols, plus the fakes the default suite runs on |
+| `app/routers/corpus.py` | `GET /corpus/stats` — row/embedding counts; the only read window into the write-only corpus |
+| `app/runner.py` | Semaphore-bounded background execution, status transitions, graph streaming, corpus ingest |
+| `app/corpus.py` | Ingest: domain normalization, entity upsert (`ON CONFLICT`), one batched embedding call per run |
+| `app/clients/` | Perplexity + Anthropic + OpenAI-embedding clients behind protocols, plus the fakes the default suite runs on |
+| `app/scripts/` | `python -m app.scripts.backfill` — one-shot backfill for pre-ingest reports |
 | `app/graph/` | The LangGraph pipeline — see `app/graph/CLAUDE.md` |
 | `alembic/` | Migrations. `env.py` carries the `include_object` hook |
 | `tests/` | Integration tests against a real Postgres. Real DB, fake model providers |
@@ -26,7 +29,7 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 - **Short-lived sessions in background work.** `runner._patch` opens a session per write rather than holding one across a 90s run; otherwise `max_concurrent_runs` runs exhaust the pool.
 - **Nothing may escape into `BackgroundTasks`** — an exception there vanishes silently. `run_report` catches everything and records `status="failed"` with the error text.
 - **Model providers are injected, not imported.** `build_graph` takes a `ResearchClient` and a `JudgeClient`; `app/clients/build_clients()` constructs the real ones and is the single seam tests monkeypatch. Adding a provider means adding a protocol here, not reaching for it inside a node.
-- **Corpus writes are best-effort and always last.** `runner._write_chunks` runs after the report row is committed and swallows its own errors: a corpus failure must never cost the user their report.
+- **Corpus writes are best-effort and always last.** `runner._ingest` runs after the report row is committed and swallows its own errors: a corpus failure must never cost the user their report. Inside ingest, a missing/failed embedder degrades to NULL embeddings with the rows still written — the vector columns are nullable for exactly this reason, and `make backfill` can repair them.
 - Line length 100, ruff with `E,F,I,UP,B`.
 
 ## Gotchas
@@ -54,3 +57,10 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 - **`ASGITransport` awaits `BackgroundTasks` inside the POST**, so a report is already finished when the response returns. Tests that need to observe intermediate `step` values must poll concurrently with the request, not after it.
 - **A LangGraph `RetryPolicy` on a research node would be dead config**, because those nodes swallow their own exceptions and never raise. Retry lives inside the node. See `app/graph/CLAUDE.md`.
 - **`PERPLEXITY_CONCURRENCY` is not `MAX_CONCURRENT_RUNS`.** One run makes four Sonar calls, so 5 concurrent runs would mean 20 concurrent vendor requests. They are separate settings on purpose; don't collapse them.
+
+## Gotchas (Phase 3)
+
+- **Entity upserts dedupe within the batch before `ON CONFLICT`.** Postgres cannot touch the same row twice in one `INSERT ... ON CONFLICT` statement, and the judge can name the same company in two dossiers — without the pre-dedupe in `upsert_entities`, that run fails with `CardinalityViolation`. Domain-less competitors are plain inserts (multiple NULLs are legal under the unique constraint).
+- **The `OPENAI_API_KEY` is optional by design.** `build_embedder()` returns `None` and warns rather than raising like `build_clients` — the app is fully useful without embeddings, and the corpus invariant is best-effort. The tell is `GET /corpus/stats` showing `embedded < total`.
+- **The backfill must not re-embed what already has a vector.** `upsert_entities` coalesces a new embedding away when the row already has one, so `embed_missing_entities` queries which domains are already embedded and passes `None` for those — otherwise every backfill run pays OpenAI for vectors Postgres discards. Only the entity path needs this; the idea and chunk paths filter on `IS NULL` in SQL.
+- **The test DB is session-scoped; corpus rows accumulate across tests.** Corpus tests use a unique judge domain each (`FakeJudge(domain=...)`) and the stats test asserts before/after deltas, never absolutes.
