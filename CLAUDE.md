@@ -22,6 +22,7 @@ make api       # uvicorn on :8000
 make web       # next dev on :3000
 make test      # pytest (creates + migrates ideacheck_test)
 make backfill  # backfill corpus embeddings/entities for pre-Phase-3 reports
+make types     # regenerate openapi.json + web/lib/api.gen.ts (commit both)
 make fmt       # ruff check --fix && ruff format
 make reset     # drop volume, recreate, re-migrate
 ```

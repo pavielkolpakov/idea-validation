@@ -10,7 +10,9 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 | `app/config.py` | `pydantic-settings`; reads `api/.env`. Exposes `psycopg_dsn` (the SQLAlchemy URL without the `+psycopg` prefix) |
 | `app/db.py` | Async engine + `get_db` request dependency |
 | `app/models.py` | All 6 tables. `EMBEDDING_DIM = 1536` |
-| `app/schemas.py` | Request/response models; idea length bounds live here |
+| `app/schemas.py` | Request/response models; idea length bounds, `ReportBody`, the gate error models |
+| `app/scripts/dump_openapi.py` | `make types` step 1 — writes `openapi.json` with no server and no DB |
+| `openapi.json` | **Generated, committed.** The contract `web/lib/api.gen.ts` is built from |
 | `app/auth.py` | Identity. `Authorization: Bearer` (verified) or `X-Anon-Id` → get-or-create `users` row |
 | `app/quota.py` | Atomic per-run quota claim, refund on failure, in-memory per-IP cap |
 | `app/guardrails.py` | Holds the injected pre-check client (set during lifespan) |
@@ -68,6 +70,13 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 - **`PERPLEXITY_CONCURRENCY` is not `MAX_CONCURRENT_RUNS`.** One run makes four Sonar calls, so 5 concurrent runs would mean 20 concurrent vendor requests. They are separate settings on purpose; don't collapse them.
 
 ## Gotchas (Phase 4)
+
+- **`ReportBody` is not `JudgeReport`, and the duplication is deliberate.** `JudgeReport` is a *generation* contract — strict, so a bad judge output fails the run. `ReportBody` is a *serialization* contract over rows already in the database. Reusing the strict model as a response type turns any row written under older rules (a pre-rename `competitive_intensity`, a report with zero risks) into a 500 on `GET`: the user's paid-for report becomes unservable because of a rule that exists to police the LLM. `tests/test_api_contract.py` asserts the field sets stay in step so the copies can't drift, and serves the exact Phase 1 stub payload as a regression case.
+- **Tolerance means type changes too, not just missing fields.** Phase 1 wrote `risks`/`differentiation` as lists of plain strings; a `mode="before"` validator lifts them to `{text, sources: []}`. "The field exists but holds a different type" is the most common way a stored shape moves, and it was the case the first tolerance test missed by using an empty list.
+- **`status` is a `Literal`, not `str`**, so the generated client gets an exhaustive union. It must stay equal to `models.REPORT_STATUSES` (which the DB `CHECK` enforces) — there's a test for that.
+- **The gate responses are declared on the route** (`SUBMISSION_GATES`) and their bodies are built from the same Pydantic models that document them, so the documented shape and the real one cannot drift. The frontend branches on `reason` to tell "sign in" from "out of runs" from "you already ran this".
+- **A pre-check rejection's `detail` must stay a plain string.** `web/lib/api.ts::explain` surfaces it verbatim as the error message; a list (the FastAPI validation-error shape) would degrade to a bare status code. Pinned in `tests/test_guardrails.py`.
+- **After touching `schemas.py` or a route, run `make types`** and commit `api/openapi.json` + `web/lib/api.gen.ts`. Vercel's build cannot reach the API to generate them.
 
 - **`POST /reports` gate order is load-bearing**: per-IP cap (in-memory) → `has_budget` advisory read → pre-check (paid Haiku call) → advisory lock → duplicate → `consume` → insert → commit. Two constraints pin it: the *free* checks must precede the paid one, or an exhausted signed-in account can spend indefinitely by retrying (they are exempt from the IP cap); and the *authoritative* claim must come after the duplicate check, or rejected submissions burn credits.
 - **The duplicate check and the insert are one critical section.** `quota.lock_submission` takes a `pg_advisory_xact_lock` keyed on `(user_id, idea)`, held until commit. Without it two concurrent identical submits both read "no duplicate", both consume a credit, and both launch a full research run — verified, and it is exactly what a double-clicked button does.

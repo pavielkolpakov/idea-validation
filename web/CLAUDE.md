@@ -11,7 +11,8 @@ Next.js 16, App Router, TypeScript, Tailwind. Dev server on :3000; talks to the 
 | Path | Role |
 |---|---|
 | `app/page.tsx` | The only real page. Submit an idea, poll, dump raw JSON |
-| `lib/api.ts` | Typed fetch helpers + the `Report` type. All API access goes through here |
+| `lib/api.ts` | Hand-written fetch helpers + `ApiError`. All API access goes through here |
+| `lib/api.gen.ts` | **Generated — do not edit.** `make types` rebuilds it from `api/openapi.json` |
 | `.env.local` | `NEXT_PUBLIC_API_URL` (defaults to `http://localhost:8000`) |
 
 ## State of play
@@ -24,7 +25,10 @@ Next.js 16, App Router, TypeScript, Tailwind. Dev server on :3000; talks to the 
 
 - The API returns **202 + a `public_slug`**, then the client polls `GET /reports/{slug}` every 1.5s until `status` is `succeeded` or `failed` (`TERMINAL` in `lib/api.ts`). Phase 4 replaces polling with SSE.
 - **`X-Anon-Id` is sent by `lib/api.ts`** — a uuid minted once per browser and kept in `localStorage`. The server resolves it to an ordinary `users` row and grants it **one** free run; after that the API returns `429 {"reason": "anon_quota"}` and the UI is expected to ask for a sign-in. Clerk and `Authorization: Bearer` land in Slice 3, along with the one-time `POST /auth/claim` that moves the anonymous report onto the new account.
-- Keep types in `lib/api.ts` in sync with `api/app/schemas.py` by hand for now — OpenAPI codegen lands in Phase 4, once the report schema settles.
+- **Types are generated, helpers are not.** `lib/api.gen.ts` comes from the backend's OpenAPI spec via `make types` and is committed (Vercel's build can't reach the API). `lib/api.ts` re-exports the useful names and keeps the fetch wrappers hand-written — the interesting part is the credential headers, and a generated client would bury them in middleware. After changing `api/app/schemas.py` or a route, run `make types` and commit both outputs.
+- **Gate failures carry a `reason`.** `createReport` throws `ApiError`, which keeps the parsed body: `reason` is `anon_quota` | `user_quota` | `ip_rate` | `duplicate`, and a duplicate also carries `existingSlug`. These are the branches the UI is built on — don't collapse them into a generic error string.
+- **`ApiError.message` is already the useful text.** `explain()` prefers the server's `detail` string (a pre-check rejection), then the gate `reason` code, then the status. Render `e.message`, not `String(e)` — the latter prefixes the class name and buries it.
+- **No JS test runner here yet.** `npx tsc --noEmit` is the only automated check on this package; anything behavioural is verified in a browser. Worth revisiting when the report page lands.
 - Typecheck with `npx tsc --noEmit`.
 
 ## Known noise

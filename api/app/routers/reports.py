@@ -17,6 +17,8 @@ from app.runner import run_report
 from app.schemas import (
     CreateReportRequest,
     CreateReportResponse,
+    DuplicateError,
+    QuotaError,
     ReportResponse,
     ReportSummary,
 )
@@ -56,7 +58,21 @@ async def _recent_duplicate(db: AsyncSession, user_id: int, idea: str) -> str | 
     )
 
 
-@router.post("", status_code=status.HTTP_202_ACCEPTED, response_model=CreateReportResponse)
+# Declared so codegen types them: the UI branches on these to tell "sign in" from
+# "out of runs" from "you already ran this". Bodies are built from the same
+# models, so the documented shape and the real one cannot drift.
+SUBMISSION_GATES = {
+    409: {"model": DuplicateError, "description": "You already ran this idea recently."},
+    429: {"model": QuotaError, "description": "Free run used, quota exhausted, or rate limited."},
+}
+
+
+@router.post(
+    "",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=CreateReportResponse,
+    responses=SUBMISSION_GATES,
+)
 async def create_report(
     payload: CreateReportRequest,
     request: Request,
@@ -66,14 +82,16 @@ async def create_report(
 ) -> CreateReportResponse:
     # Coarsest gate first, before a single model call is made.
     if quota.is_anonymous(user) and not await quota.ip_allowed(request):
-        return JSONResponse(status_code=429, content={"reason": "ip_rate"})
+        return JSONResponse(status_code=429, content=QuotaError(reason="ip_rate").model_dump())
 
     # Then the free one. The pre-check is a paid call and signed-in callers are
     # exempt from the IP cap, so an exhausted account that is only stopped
     # *after* classification can spend indefinitely by retrying. Advisory read:
     # `consume` below is still the gate that decides.
     if not await quota.has_budget(db, user):
-        return JSONResponse(status_code=429, content={"reason": quota.reason_for(user)})
+        return JSONResponse(
+            status_code=429, content=QuotaError(reason=quota.reason_for(user)).model_dump()
+        )
 
     rejection = await get_precheck().check(payload.idea)
     if rejection:
@@ -88,7 +106,7 @@ async def create_report(
         existing = await _recent_duplicate(db, user.id, payload.idea)
         if existing:
             return JSONResponse(
-                status_code=409, content={"reason": "duplicate", "existing_slug": existing}
+                status_code=409, content=DuplicateError(existing_slug=existing).model_dump()
             )
 
     # Claimed before anything is spent, and refunded if the run fails. The
@@ -96,7 +114,9 @@ async def create_report(
     # claim can reassign the report before it finishes.
     charged_user_id, charged_period = user.id, quota.period_for(user)
     if not await quota.consume(db, user):
-        return JSONResponse(status_code=429, content={"reason": quota.reason_for(user)})
+        return JSONResponse(
+            status_code=429, content=QuotaError(reason=quota.reason_for(user)).model_dump()
+        )
 
     idea = Idea(text=payload.idea, target_user=payload.target_user)
     db.add(idea)
