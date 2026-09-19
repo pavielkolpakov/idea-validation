@@ -14,6 +14,7 @@ rollover, so a monthly period would hand out a fresh free run every January.
 import hashlib
 import time
 from datetime import UTC, datetime
+from typing import Literal
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -40,7 +41,7 @@ def limit_for(user: User) -> int:
     return _settings.anon_free_runs if is_anonymous(user) else _settings.monthly_free_runs
 
 
-def reason_for(user: User) -> str:
+def reason_for(user: User) -> Literal["anon_quota", "user_quota"]:
     return "anon_quota" if is_anonymous(user) else "user_quota"
 
 

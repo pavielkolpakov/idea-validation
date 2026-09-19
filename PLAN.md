@@ -198,8 +198,13 @@ Key points:
 - [x] Per-user duplicate detection with a `force` escape hatch; migration 0002 (`md5(ideas.text)` index).
 - [x] `GET /reports` history, pulled forward from Slice 2 so the claim is verifiable through the public interface.
 
+**Slice 2 — typed API surface ✅ complete**
+- [x] Tolerant `ReportBody` + gate error models (`QuotaError`, `DuplicateError`) declared on the route.
+- [x] `ReportStatus` as a `Literal`, pinned to `models.REPORT_STATUSES` by a test.
+- [x] `make types`: spec dumped with no server (`app/scripts/dump_openapi.py`) → `openapi-typescript` → `web/lib/api.gen.ts`. Both outputs committed.
+- [x] `lib/api.ts` re-exports generated types; fetch helpers stay hand-written; `ApiError` carries the gate `reason`.
+
 **Remaining**
-- [ ] Tolerant `ReportBody` response model + OpenAPI type codegen (`web/lib/api.gen.ts`, committed).
 - [ ] Report page (RSC shell + client view), share links, Clerk on the frontend.
 - [ ] SSE progress streaming, replacing polling.
 - [ ] Golden-set eval: ~15 ideas with known outcomes, judge-only over frozen dossiers.
@@ -217,6 +222,8 @@ Key points:
 - **Duplicate detection is per user, never global.** Global dedupe would serve the first founder's report to the second and destroy the "N people pitched this" signal `ideas` exists for. `force: true` keeps the deliberate re-run available.
 - **The `md5(ideas.text)` index is declared in `models.py` as well as the migration** — without it `--autogenerate` proposes dropping the index, the same trap the checkpointer tables have.
 - **Prompt caching on the judge rubric was cut, on measurement.** `JUDGE_SYSTEM` is ~335 tokens against Claude Opus 5's 512-token minimum; even counting the structured-output tool schema, under 10% of a judge request is cacheable while four unique dossiers make up the rest. At this traffic the 5-minute TTL means writes (1.25×) with almost no reads — a surcharge, not a saving. Revisit as an eval-harness concern, where fixed dossiers are the reusable prefix.
+- **Codegen emits types, not a client.** The hand-written fetch helpers stay: the interesting part of this client is the credential headers (anon id now, Bearer + claim in slice 3), and a generated client would bury them in middleware. Typing the *error* responses mattered more than typing the happy path — the sign-in wall and the duplicate prompt are the most product-critical branches in the UI, and they all arrive as non-2xx.
+- **The spec is dumped without a running server** so `make types` works on a cold checkout and in CI, and it is committed: a spec diff is the most readable signal a reviewer gets that an API contract moved, which a diff of generated TypeScript is not.
 - **Deploy is last, by choice.** The hedge is writing the Dockerfile/Railway config early and pointing the local app at a managed Postgres once, so pgvector, SSL and pool sizing are proven before Clerk and SSE are in the mix.
 
 ## Open Questions
