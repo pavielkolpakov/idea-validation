@@ -8,6 +8,8 @@ asserts deltas rather than absolutes.
 import asyncio
 import uuid
 
+import pytest
+
 IDEA = "A scheduling tool for independent piano teachers and their students."
 
 
@@ -166,32 +168,56 @@ async def test_corpus_stats_endpoint(client, judge):
     assert after["research_chunks"]["embedded"] == before["research_chunks"]["embedded"] + 4
 
 
-async def test_backfill_skips_entities_that_are_already_embedded(embedder):
-    """The upsert coalesces a redundant vector away, so don't pay for one."""
-    from app.corpus import embed_missing_entities, upsert_entities
+async def test_wrong_dimension_vectors_degrade_to_null(client, judge, embedder):
+    """A model whose vectors don't fit the schema costs vectors, not rows.
+
+    `text-embedding-3-large` returns 3072 dimensions against 1536-wide columns.
+    The API call succeeds, so this cannot be caught as an embedding failure —
+    without a guard it surfaces at commit and takes the whole run's corpus
+    writes down with it.
+    """
+    judge.domain = _unique_domain()
+    embedder.DIM = 3072
+
+    body = await _run_report(client)
+    assert body["status"] == "succeeded", body.get("error")
+
+    assert await _idea_embedding(body["id"]) is None
+
+    entity = (await _entity_by_domain(judge.domain)).one()
+    assert entity.embedding is None
+
+    chunks = await _chunks(body["id"])
+    assert len(chunks) == 4
+    assert all(c.embedding is None for c in chunks)
+
+
+async def test_backfill_keeps_each_vector_with_its_own_description(embedder):
+    """Two reports describing one domain differently must not cross vectors.
+
+    The upsert overwrites `description` on every sighting, so whichever pass
+    supplies the embedding must be the pass whose description lands with it.
+    """
+    from sqlalchemy import select
+
+    from app.corpus import backfill_report, entity_embedding_text
     from app.db import SessionLocal
+    from app.models import Entity
 
-    embedded, missing, plain = _unique_domain(), _unique_domain(), None
+    domain = _unique_domain()
+    first = {"competitors": [{"name": "Co", "domain": domain, "what_they_do": "desc A"}]}
+    second = {"competitors": [{"name": "Co", "domain": domain, "what_they_do": "desc B"}]}
+
+    for report in (first, second):
+        async with SessionLocal() as session:
+            await backfill_report(session, embedder, report=report, idea=None, report_id=None)
+            await session.commit()
+
     async with SessionLocal() as session:
-        await upsert_entities(
-            session,
-            [
-                {"name": "Has Vector", "domain": embedded, "what_they_do": "Already embedded."},
-                {"name": "No Vector", "domain": missing, "what_they_do": "Embedding is NULL."},
-            ],
-            [[0.5] * embedder.DIM, None],
-        )
-        await session.commit()
+        entity = (await session.scalars(select(Entity).where(Entity.domain == domain))).one()
 
-    competitors = [
-        {"name": "Has Vector", "domain": f"https://www.{embedded}/x", "what_they_do": "Same co."},
-        {"name": "No Vector", "domain": missing, "what_they_do": "Same co."},
-        {"name": "Domainless", "domain": plain, "what_they_do": "Plain insert."},
-    ]
-    async with SessionLocal() as session:
-        vectors = await embed_missing_entities(session, embedder, competitors)
-
-    assert vectors[0] is None
-    assert vectors[1] is not None and vectors[2] is not None
-    # Only the two that need a vector were sent to the embedder.
-    assert [len(b) for b in embedder.batches] == [2]
+    expected = embedder._vector(entity_embedding_text(second["competitors"][0]))
+    assert entity.description == "desc B"
+    assert entity.embedding[0] == pytest.approx(expected[0]), (
+        "stored vector was computed from a different description"
+    )

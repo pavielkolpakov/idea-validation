@@ -20,7 +20,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.embeddings import EmbeddingClient
-from app.models import Entity, Idea, ResearchChunk
+from app.models import EMBEDDING_DIM, Entity, Idea, ResearchChunk
 
 log = logging.getLogger(__name__)
 
@@ -47,10 +47,25 @@ async def _embed(embedder: EmbeddingClient | None, texts: list[str]) -> list[lis
     if embedder is None or not texts:
         return [None] * len(texts)
     try:
-        return await embedder.embed(texts)
+        vectors = await embedder.embed(texts)
     except Exception:  # noqa: BLE001 — best-effort; rows are still written
         log.exception("embedding failed; writing corpus rows with NULL embeddings")
         return [None] * len(texts)
+
+    # A model whose vectors don't fit the columns is a *successful* API call, so
+    # it cannot arrive as the exception above. Unguarded it surfaces at commit
+    # and rolls back every row the run was writing — turning a misconfigured
+    # EMBEDDING_MODEL into total corpus loss rather than missing vectors.
+    wrong = next((len(v) for v in vectors if len(v) != EMBEDDING_DIM), None)
+    if wrong is not None:
+        log.error(
+            "embedder returned %d-dim vectors, expected %d; writing corpus rows "
+            "with NULL embeddings (check EMBEDDING_MODEL)",
+            wrong,
+            EMBEDDING_DIM,
+        )
+        return [None] * len(texts)
+    return vectors
 
 
 async def upsert_entities(
@@ -185,38 +200,34 @@ async def embed_missing_idea(embedder: EmbeddingClient, idea: Idea) -> None:
     idea.embedding = vec
 
 
-async def embed_missing_entities(
-    session: AsyncSession, embedder: EmbeddingClient, competitors: list[dict]
-) -> list[list[float] | None]:
-    """Backfill helper: vectors for `upsert_entities`, embedding only what needs it.
+async def backfill_report(
+    session: AsyncSession,
+    embedder: EmbeddingClient,
+    *,
+    report: dict | None,
+    idea: Idea | None,
+    report_id: int | None,
+) -> tuple[int, int]:
+    """Re-ingest one pre-Phase-3 report. Caller commits. Returns (entities, chunks).
 
-    The upsert coalesces a new embedding away when the row already has one, so
-    embedding an already-embedded entity is spend for a discarded result. Returns
-    a vector per competitor, `None` where the existing row already has one.
-    Domain-less competitors are always embedded — they are plain inserts.
+    Every competitor is embedded on every pass, deliberately. Skipping the ones
+    whose entity already has a vector looks like free savings, but the upsert
+    overwrites `description` on each sighting while coalescing the embedding —
+    so a skipped pass leaves the previous description's vector sitting under this
+    pass's text. Correct beats cheap: this is a one-shot script over historical
+    reports, and the spend is cents.
     """
-    domains = {normalize_domain(c.get("domain")) for c in competitors} - {None}
-    embedded: set[str] = set()
-    if domains:
-        embedded = set(
-            (
-                await session.scalars(
-                    select(Entity.domain).where(
-                        Entity.domain.in_(domains), Entity.embedding.is_not(None)
-                    )
-                )
-            ).all()
-        )
+    if idea is not None and idea.embedding is None:
+        await embed_missing_idea(embedder, idea)
 
-    stale = [
-        i for i, c in enumerate(competitors) if normalize_domain(c.get("domain")) not in embedded
-    ]
-    vectors: list[list[float] | None] = [None] * len(competitors)
-    if stale:
-        computed = await embedder.embed([entity_embedding_text(competitors[i]) for i in stale])
-        for i, vec in zip(stale, computed, strict=True):
-            vectors[i] = vec
-    return vectors
+    competitors = (report or {}).get("competitors") or []
+    vectors = await _embed(embedder, [entity_embedding_text(c) for c in competitors])
+    entities = await upsert_entities(session, competitors, vectors)
+
+    chunks = 0
+    if report_id is not None:
+        chunks = await chunks_missing_embeddings(session, embedder, report_id)
+    return entities, chunks
 
 
 async def chunks_missing_embeddings(

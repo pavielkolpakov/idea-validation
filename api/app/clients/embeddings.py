@@ -10,6 +10,7 @@ request.
 from typing import Protocol
 
 from app.config import get_settings
+from app.models import EMBEDDING_DIM
 
 _settings = get_settings()
 
@@ -22,9 +23,15 @@ class OpenAIEmbedder:
     def __init__(self, model: str | None = None) -> None:
         from langchain_openai import OpenAIEmbeddings
 
+        # Pinned to the column width, not left to the model's default: the
+        # 3-series supports dimension reduction, so `text-embedding-3-large`
+        # returns 1536 here instead of the 3072 the schema cannot store.
+        # `corpus._embed` still checks the result — a model that ignores this
+        # must cost vectors, not the run's rows.
         self._model = OpenAIEmbeddings(
             model=model or _settings.embedding_model,
             api_key=_settings.openai_api_key,
+            dimensions=EMBEDDING_DIM,
         )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:

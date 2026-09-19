@@ -19,12 +19,7 @@ from sqlalchemy import select
 
 from app.clients.embeddings import OpenAIEmbedder
 from app.config import get_settings
-from app.corpus import (
-    chunks_missing_embeddings,
-    embed_missing_entities,
-    embed_missing_idea,
-    upsert_entities,
-)
+from app.corpus import backfill_report
 from app.db import SessionLocal
 from app.models import Idea, Report
 
@@ -49,15 +44,15 @@ async def main() -> None:
 
     for report in reports:
         async with SessionLocal() as session:
-            idea = await session.get(Idea, report.idea_id)
-            if idea is not None and idea.embedding is None:
-                await embed_missing_idea(embedder, idea)
-
-            competitors = (report.report or {}).get("competitors") or []
-            vectors = await embed_missing_entities(session, embedder, competitors)
-            total_entities += await upsert_entities(session, competitors, vectors)
-
-            total_chunks += await chunks_missing_embeddings(session, embedder, report.id)
+            entities, chunks = await backfill_report(
+                session,
+                embedder,
+                report=report.report,
+                idea=await session.get(Idea, report.idea_id),
+                report_id=report.id,
+            )
+            total_entities += entities
+            total_chunks += chunks
             await session.commit()
         log.info("report %s done", report.id)
 
