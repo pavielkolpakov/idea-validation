@@ -68,10 +68,21 @@ async def create_report(
     if quota.is_anonymous(user) and not await quota.ip_allowed(request):
         return JSONResponse(status_code=429, content={"reason": "ip_rate"})
 
-    # Then the cheap one: a rejection here costs one Haiku call and no credit.
+    # Then the free one. The pre-check is a paid call and signed-in callers are
+    # exempt from the IP cap, so an exhausted account that is only stopped
+    # *after* classification can spend indefinitely by retrying. Advisory read:
+    # `consume` below is still the gate that decides.
+    if not await quota.has_budget(db, user):
+        return JSONResponse(status_code=429, content={"reason": quota.reason_for(user)})
+
     rejection = await get_precheck().check(payload.idea)
     if rejection:
         raise HTTPException(status_code=422, detail=rejection)
+
+    # Everything from here to the commit is one critical section per (user,
+    # idea): the duplicate check, the credit claim, and the insert that makes
+    # the duplicate visible to the next request.
+    await quota.lock_submission(db, user, payload.idea)
 
     if not payload.force:
         existing = await _recent_duplicate(db, user.id, payload.idea)
@@ -80,7 +91,10 @@ async def create_report(
                 status_code=409, content={"reason": "duplicate", "existing_slug": existing}
             )
 
-    # Claimed before anything is spent, and refunded if the run fails.
+    # Claimed before anything is spent, and refunded if the run fails. The
+    # charged identity is captured here and carried into the run, because a
+    # claim can reassign the report before it finishes.
+    charged_user_id, charged_period = user.id, quota.period_for(user)
     if not await quota.consume(db, user):
         return JSONResponse(status_code=429, content={"reason": quota.reason_for(user)})
 
@@ -98,7 +112,15 @@ async def create_report(
     await db.commit()
     await db.refresh(report)
 
-    background.add_task(run_report, report.id, idea.id, payload.idea, payload.target_user)
+    background.add_task(
+        run_report,
+        report.id,
+        idea.id,
+        payload.idea,
+        payload.target_user,
+        charged_user_id,
+        charged_period,
+    )
 
     return CreateReportResponse(id=report.id, public_slug=report.public_slug, status=report.status)
 

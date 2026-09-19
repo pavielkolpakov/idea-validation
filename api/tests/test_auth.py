@@ -240,3 +240,52 @@ async def test_anonymous_runs_are_capped_per_ip(client):
     )
     assert blocked.status_code == 429
     assert blocked.json()["reason"] == "ip_rate"
+
+
+async def test_concurrent_identical_submissions_produce_one_run(client, auth):
+    """A double-clicked submit must not buy two identical reports.
+
+    The duplicate check and the insert have to be serialized per (user, idea):
+    otherwise both requests read "no duplicate", both consume a credit, and both
+    launch a full research run.
+    """
+    first, second = await asyncio.gather(
+        client.post("/reports", json={"idea": IDEA}, headers=auth),
+        client.post("/reports", json={"idea": IDEA}, headers=auth),
+    )
+    assert sorted([first.status_code, second.status_code]) == [202, 409]
+
+    mine = await client.get("/reports", headers=auth)
+    assert len(mine.json()) == 1
+
+
+async def test_claiming_an_in_flight_report_does_not_misdirect_its_refund(
+    client, auth, research_client
+):
+    """The refund must go back to whoever was charged.
+
+    A claim rewrites `reports.user_id` while the run is still going. If the
+    refund resolves the owner at failure time, it credits the signed-in account
+    and leaves the anonymous visitor's one free run permanently spent.
+    """
+    anon_id = str(uuid4())
+    anon = {"X-Anon-Id": anon_id}
+    research_client.fail_agents = {"competitors", "incumbents", "market_signals", "graveyard"}
+    # Keep the run alive long enough to claim it mid-flight.
+    research_client.delays = dict.fromkeys(research_client.fail_agents, 0.3)
+
+    post = asyncio.create_task(client.post("/reports", json={"idea": IDEA}, headers=anon))
+    await asyncio.sleep(0.15)
+
+    claimed = await client.post("/auth/claim", headers={**auth, "X-Anon-Id": anon_id})
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["claimed"] == 1
+
+    resp = await post
+    body = await _poll_until_terminal(client, resp.json()["public_slug"])
+    assert body["status"] == "failed"
+
+    research_client.fail_agents = set()
+    research_client.delays = {}
+    again = await client.post("/reports", json={"idea": OTHER_IDEA}, headers=anon)
+    assert again.status_code == 202, again.text

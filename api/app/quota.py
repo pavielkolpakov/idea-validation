@@ -15,13 +15,13 @@ import hashlib
 import time
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import ANON_PREFIX
 from app.config import get_settings
-from app.models import Report, UsageCounter, User
+from app.models import UsageCounter, User
 
 ANON_PERIOD = "anon"
 
@@ -44,8 +44,42 @@ def reason_for(user: User) -> str:
     return "anon_quota" if is_anonymous(user) else "user_quota"
 
 
+async def has_budget(db: AsyncSession, user: User) -> bool:
+    """Cheap advisory read: is there any quota left at all?
+
+    Exists purely to turn an exhausted caller away *before* the paid pre-check
+    runs. It is not the gate — `consume` is, because only one statement can be
+    atomic — so a race here costs at most one extra classifier call.
+    """
+    used = await db.scalar(
+        select(UsageCounter.count).where(
+            UsageCounter.user_id == user.id, UsageCounter.period == period_for(user)
+        )
+    )
+    return (used or 0) < limit_for(user)
+
+
+async def lock_submission(db: AsyncSession, user: User, idea: str) -> None:
+    """Serialize concurrent submissions of the same idea by the same user.
+
+    Held until the transaction ends, so the duplicate check and the insert that
+    follows it are one critical section. Without it a double-clicked submit
+    passes the duplicate check twice, consumes two credits, and launches two
+    full research runs — the exact outcome the duplicate check exists to stop.
+    """
+    key = int.from_bytes(
+        hashlib.sha256(f"{user.id}:{idea}".encode()).digest()[:8], "big", signed=True
+    )
+    await db.execute(select(func.pg_advisory_xact_lock(key)))
+
+
 async def consume(db: AsyncSession, user: User) -> bool:
-    """Claim one run. Returns False when the caller is already at the limit."""
+    """Claim one run. Returns False when the caller is already at the limit.
+
+    Deliberately does not commit: the caller holds the transaction open through
+    the insert, so the row lock this statement takes also serializes concurrent
+    claims until the report actually exists.
+    """
     stmt = (
         insert(UsageCounter)
         .values(user_id=user.id, period=period_for(user), count=1)
@@ -57,29 +91,29 @@ async def consume(db: AsyncSession, user: User) -> bool:
         .returning(UsageCounter.count)
     )
     granted = await db.scalar(stmt)
-    await db.commit()
     return granted is not None
 
 
-async def refund_for_report(report_id: int) -> None:
+async def refund(user_id: int, period: str) -> None:
     """Give back the credit a failed run consumed.
 
-    Opens its own session, matching the runner's short-lived-session convention:
-    this is called from the failure path, where no request session exists.
+    Takes the charged identity explicitly rather than resolving the report's
+    current owner: `POST /auth/claim` rewrites `reports.user_id` while a run is
+    still going, so resolving at failure time credits the account that just
+    claimed the report and leaves the anonymous visitor who actually paid
+    permanently out of pocket.
+
+    Opens its own session, matching the runner's short-lived-session
+    convention: the failure path has no request session.
     """
     from app.db import SessionLocal
 
     async with SessionLocal() as session:
-        user = await session.scalar(
-            select(User).join(Report, Report.user_id == User.id).where(Report.id == report_id)
-        )
-        if user is None:
-            return
         await session.execute(
             update(UsageCounter)
             .where(
-                UsageCounter.user_id == user.id,
-                UsageCounter.period == period_for(user),
+                UsageCounter.user_id == user_id,
+                UsageCounter.period == period,
                 UsageCounter.count > 0,
             )
             .values(count=UsageCounter.count - 1)

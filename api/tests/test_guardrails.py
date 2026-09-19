@@ -63,3 +63,31 @@ async def test_the_idea_reaches_the_researchers_as_delimited_data(client, auth, 
 
     for prompt in research_client.prompts:
         assert f"<idea>\n{hostile}\n</idea>" in prompt
+
+
+async def test_an_exhausted_account_cannot_trigger_paid_prechecks(client, auth, precheck):
+    """Over-quota callers must be turned away before the classifier runs.
+
+    The pre-check is a paid Anthropic call. A signed-in caller is exempt from
+    the per-IP cap, so if quota is only enforced *after* the classifier, an
+    exhausted account can spend indefinitely just by retrying.
+    """
+    from app.config import get_settings
+
+    for i in range(get_settings().monthly_free_runs):
+        resp = await client.post(
+            "/reports",
+            json={"idea": f"A booking tool for mobile bicycle repair, variant {i}."},
+            headers=auth,
+        )
+        assert resp.status_code == 202, resp.text
+        await _poll_until_terminal(client, resp.json()["public_slug"])
+
+    precheck.checked.clear()
+    over = await client.post(
+        "/reports",
+        json={"idea": "One idea past the limit, which must not be classified."},
+        headers=auth,
+    )
+    assert over.status_code == 429
+    assert precheck.checked == []
