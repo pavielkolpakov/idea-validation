@@ -67,11 +67,11 @@ async def test_health(client):
     assert resp.status_code == 200
 
 
-async def test_create_and_complete_report(client, research_client):
+async def test_create_and_complete_report(client, research_client, auth):
     resp = await client.post(
         "/reports",
         json={"idea": IDEA},
-        headers={"X-Debug-User": "test"},
+        headers=auth,
     )
     assert resp.status_code == 202
 
@@ -97,7 +97,7 @@ async def test_create_and_complete_report(client, research_client):
     assert body["report"]["degraded_agents"] == []
 
 
-async def test_one_failed_agent_still_produces_a_report(client, research_client):
+async def test_one_failed_agent_still_produces_a_report(client, research_client, auth):
     """A dead researcher costs you a dossier, not the whole run.
 
     RetryPolicy has already absorbed the transient case by this point, so failing
@@ -106,7 +106,7 @@ async def test_one_failed_agent_still_produces_a_report(client, research_client)
     """
     research_client.fail_agents = {"graveyard"}
 
-    resp = await client.post("/reports", json={"idea": IDEA}, headers={"X-Debug-User": "test"})
+    resp = await client.post("/reports", json={"idea": IDEA}, headers=auth)
     body = await _poll_until_terminal(client, resp.json()["public_slug"])
 
     assert body["status"] == "succeeded", body.get("error")
@@ -115,7 +115,7 @@ async def test_one_failed_agent_still_produces_a_report(client, research_client)
     assert body["score"] == 62
 
 
-async def test_transient_failure_is_retried(client, research_client):
+async def test_transient_failure_is_retried(client, research_client, auth):
     """A timeout should cost a retry, not a dossier.
 
     Perplexity timeouts and 429s are the common failure and they recover; the
@@ -123,7 +123,7 @@ async def test_transient_failure_is_retried(client, research_client):
     """
     research_client.flaky_agents = {"market_signals": 2}
 
-    resp = await client.post("/reports", json={"idea": IDEA}, headers={"X-Debug-User": "test"})
+    resp = await client.post("/reports", json={"idea": IDEA}, headers=auth)
     body = await _poll_until_terminal(client, resp.json()["public_slug"])
 
     assert body["status"] == "succeeded", body.get("error")
@@ -131,11 +131,11 @@ async def test_transient_failure_is_retried(client, research_client):
     assert research_client.calls.count("market_signals") == 3
 
 
-async def test_all_agents_failing_fails_the_run(client, research_client):
+async def test_all_agents_failing_fails_the_run(client, research_client, auth):
     """The floor. A report built on nothing isn't degraded, it's not a report."""
     research_client.fail_agents = set(_AGENTS)
 
-    resp = await client.post("/reports", json={"idea": IDEA}, headers={"X-Debug-User": "test"})
+    resp = await client.post("/reports", json={"idea": IDEA}, headers=auth)
     body = await _poll_until_terminal(client, resp.json()["public_slug"])
 
     assert body["status"] == "failed"
@@ -143,7 +143,7 @@ async def test_all_agents_failing_fails_the_run(client, research_client):
     assert "all research agents failed" in body["error"]
 
 
-async def test_out_of_range_citation_fails_the_run(client, judge):
+async def test_out_of_range_citation_fails_the_run(client, judge, auth):
     """The backstop that makes integer citations safe.
 
     The judge can only emit indices, so it cannot fabricate a URL — but it can
@@ -152,16 +152,16 @@ async def test_out_of_range_citation_fails_the_run(client, judge):
     """
     judge.source_index = 999
 
-    resp = await client.post("/reports", json={"idea": IDEA}, headers={"X-Debug-User": "test"})
+    resp = await client.post("/reports", json={"idea": IDEA}, headers=auth)
     body = await _poll_until_terminal(client, resp.json()["public_slug"])
 
     assert body["status"] == "failed"
     assert "citation" in body["error"]
 
 
-async def test_citations_are_indices_not_urls(client, judge):
+async def test_citations_are_indices_not_urls(client, judge, auth):
     """The judge is shown a numbered index and never asked for a URL."""
-    resp = await client.post("/reports", json={"idea": IDEA}, headers={"X-Debug-User": "test"})
+    resp = await client.post("/reports", json={"idea": IDEA}, headers=auth)
     body = await _poll_until_terminal(client, resp.json()["public_slug"])
     assert body["status"] == "succeeded", body.get("error")
 
@@ -176,9 +176,9 @@ async def test_citations_are_indices_not_urls(client, judge):
             assert citations[i].startswith("https://")
 
 
-async def test_successful_run_writes_corpus_chunks(client, research_client):
+async def test_successful_run_writes_corpus_chunks(client, research_client, auth):
     """Every run feeds the corpus, even though V1 never reads from it."""
-    resp = await client.post("/reports", json={"idea": IDEA}, headers={"X-Debug-User": "test"})
+    resp = await client.post("/reports", json={"idea": IDEA}, headers=auth)
     body = await _poll_until_terminal(client, resp.json()["public_slug"])
     assert body["status"] == "succeeded", body.get("error")
 
@@ -195,11 +195,11 @@ async def test_successful_run_writes_corpus_chunks(client, research_client):
     assert all(len(r["citations"]) == 2 for r in rows)
 
 
-async def test_degraded_agent_writes_no_empty_chunk(client, research_client):
+async def test_degraded_agent_writes_no_empty_chunk(client, research_client, auth):
     """A failed agent has nothing to contribute; don't pollute the corpus with it."""
     research_client.fail_agents = {"graveyard"}
 
-    resp = await client.post("/reports", json={"idea": IDEA}, headers={"X-Debug-User": "test"})
+    resp = await client.post("/reports", json={"idea": IDEA}, headers=auth)
     body = await _poll_until_terminal(client, resp.json()["public_slug"])
     assert body["status"] == "succeeded", body.get("error")
 
@@ -207,7 +207,7 @@ async def test_degraded_agent_writes_no_empty_chunk(client, research_client):
     assert sorted(r["agent"] for r in rows) == ["competitors", "incumbents", "market_signals"]
 
 
-async def test_progress_never_goes_backwards(client, research_client):
+async def test_progress_never_goes_backwards(client, research_client, auth):
     """Four concurrent researchers must not make progress appear to jump around.
 
     Each node announcing its own step string would give last-writer-wins: a user
@@ -225,9 +225,7 @@ async def test_progress_never_goes_backwards(client, research_client):
 
     # httpx's ASGITransport awaits BackgroundTasks inside the POST, so the run
     # is already finished by the time the response returns. Poll alongside it.
-    post = asyncio.create_task(
-        client.post("/reports", json={"idea": IDEA}, headers={"X-Debug-User": "test"})
-    )
+    post = asyncio.create_task(client.post("/reports", json={"idea": IDEA}, headers=auth))
 
     seen: list[str] = []
     while not post.done():
@@ -251,6 +249,6 @@ async def test_unknown_slug_is_404(client):
 
 
 @pytest.mark.parametrize("idea", ["too short", "x" * 2000])
-async def test_idea_length_is_validated(client, idea):
-    resp = await client.post("/reports", json={"idea": idea})
+async def test_idea_length_is_validated(client, idea, auth):
+    resp = await client.post("/reports", json={"idea": idea}, headers=auth)
     assert resp.status_code == 422

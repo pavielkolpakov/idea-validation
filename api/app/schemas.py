@@ -10,6 +10,9 @@ _settings = get_settings()
 class CreateReportRequest(BaseModel):
     idea: str = Field(min_length=20, max_length=_settings.max_idea_chars)
     target_user: str | None = Field(default=None, max_length=280)
+    # Re-running an idea months later to see what changed is a real use of this
+    # product, so the duplicate check offers rather than forbids.
+    force: bool = False
 
 
 class CreateReportResponse(BaseModel):
@@ -30,3 +33,13 @@ class ReportResponse(BaseModel):
     report: dict | None
     created_at: datetime
     updated_at: datetime
+
+
+class ReportSummary(BaseModel):
+    """History row. Deliberately not the full report: the body is tens of KB."""
+
+    public_slug: str
+    status: str
+    score: int | None
+    idea: str
+    created_at: datetime

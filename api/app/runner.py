@@ -11,6 +11,7 @@ import logging
 
 from sqlalchemy import update
 
+from app import quota
 from app.config import get_settings
 from app.corpus import ingest_run
 from app.db import SessionLocal
@@ -78,7 +79,20 @@ async def _ingest(
         log.exception("corpus ingest failed for report %s", report_id)
 
 
-async def run_report(report_id: int, idea_id: int, idea: str, target_user: str | None) -> None:
+async def run_report(
+    report_id: int,
+    idea_id: int,
+    idea: str,
+    target_user: str | None,
+    charged_user_id: int,
+    charged_period: str,
+) -> None:
+    """Execute one report run.
+
+    `charged_user_id`/`charged_period` are carried rather than looked up: a
+    claim can move the report to another account mid-run, and the refund has to
+    find whoever actually paid.
+    """
     async with _semaphore:
         try:
             await _patch(report_id, status="running", step="starting")
@@ -122,6 +136,12 @@ async def run_report(report_id: int, idea_id: int, idea: str, target_user: str |
             )
         except Exception as exc:  # noqa: BLE001 — must never escape into BackgroundTasks
             log.exception("report %s failed", report_id)
+            # The user should not pay for our failure. Best-effort, like the
+            # corpus write: a refund that raises must not replace the real error.
+            try:
+                await quota.refund(charged_user_id, charged_period)
+            except Exception:  # noqa: BLE001
+                log.exception("quota refund failed for report %s", report_id)
             await _patch(
                 report_id,
                 status="failed",

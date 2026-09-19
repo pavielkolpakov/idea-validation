@@ -7,12 +7,14 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Identity,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
 )
+from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -42,6 +44,9 @@ class User(Base):
 
 class Idea(Base):
     __tablename__ = "ideas"
+    # Declared here as well as in migration 0002 so `--autogenerate` does not
+    # propose dropping it — the same trap the checkpointer tables have.
+    __table_args__ = (Index("ix_ideas_text_md5", sql_text("md5(text)")),)
 
     id: Mapped[int] = _pk()
     text: Mapped[str] = mapped_column(Text)

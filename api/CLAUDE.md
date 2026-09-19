@@ -11,12 +11,15 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 | `app/db.py` | Async engine + `get_db` request dependency |
 | `app/models.py` | All 6 tables. `EMBEDDING_DIM = 1536` |
 | `app/schemas.py` | Request/response models; idea length bounds live here |
-| `app/auth.py` | **Placeholder.** `X-Debug-User` header → get-or-create `users` row. Phase 4 replaces this file wholesale |
-| `app/routers/reports.py` | `POST /reports` (202), `GET /reports/{public_slug}`, slug generation |
+| `app/auth.py` | Identity. `Authorization: Bearer` (verified) or `X-Anon-Id` → get-or-create `users` row |
+| `app/quota.py` | Atomic per-run quota claim, refund on failure, in-memory per-IP cap |
+| `app/guardrails.py` | Holds the injected pre-check client (set during lifespan) |
+| `app/routers/auth.py` | `POST /auth/claim` — moves an anonymous visitor's reports onto their new account |
+| `app/routers/reports.py` | `POST /reports` (202) + its gates, `GET /reports` (history), `GET /reports/{public_slug}`, slug generation |
 | `app/routers/corpus.py` | `GET /corpus/stats` — row/embedding counts; the only read window into the write-only corpus |
 | `app/runner.py` | Semaphore-bounded background execution, status transitions, graph streaming, corpus ingest |
 | `app/corpus.py` | Ingest: domain normalization, entity upsert (`ON CONFLICT`), one batched embedding call per run |
-| `app/clients/` | Perplexity + Anthropic + OpenAI-embedding clients behind protocols, plus the fakes the default suite runs on |
+| `app/clients/` | Perplexity + Anthropic + OpenAI-embedding + token-verifier + pre-check clients behind protocols, plus the fakes the default suite runs on |
 | `app/scripts/` | `python -m app.scripts.backfill` — one-shot backfill for pre-ingest reports |
 | `app/graph/` | The LangGraph pipeline — see `app/graph/CLAUDE.md` |
 | `alembic/` | Migrations. `env.py` carries the `include_object` hook |
@@ -29,6 +32,10 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 - **Short-lived sessions in background work.** `runner._patch` opens a session per write rather than holding one across a 90s run; otherwise `max_concurrent_runs` runs exhaust the pool.
 - **Nothing may escape into `BackgroundTasks`** — an exception there vanishes silently. `run_report` catches everything and records `status="failed"` with the error text.
 - **Model providers are injected, not imported.** `build_graph` takes a `ResearchClient` and a `JudgeClient`; `app/clients/build_clients()` constructs the real ones and is the single seam tests monkeypatch. Adding a provider means adding a protocol here, not reaching for it inside a node.
+- **So is identity.** `build_verifier()` and `build_precheck()` follow the same pattern. There is deliberately **no `DEV_AUTH` bypass**: an env var that disables auth is one misconfigured variable from an open API, and the failure is silent because everything keeps working. The fake verifier gives tests the same ergonomics with no bypass in shipped code.
+- **An anonymous visitor is an ordinary `users` row** (`external_id = "anon:<uuid>"`), not a special case. That is why ownership, quota, history and the claim all work with no schema change — don't add a nullable-user branch.
+- **The quota check and increment are one statement.** `quota.consume` is an `INSERT ... ON CONFLICT DO UPDATE ... WHERE count < limit RETURNING count`; over-quota is the *absence* of a returned row. A `SELECT` then `UPDATE` races a double-clicked submit, and losing that race costs a real Opus call. It deliberately **does not commit** — the caller holds the transaction through the insert so the row lock serializes concurrent claims too.
+- **`quota.has_budget` is advisory, `quota.consume` is the gate.** The read exists only to turn an exhausted caller away before the *paid* pre-check runs; a race there costs one extra Haiku call, never a free report.
 - **Corpus writes are best-effort and always last.** `runner._ingest` runs after the report row is committed and swallows its own errors: a corpus failure must never cost the user their report. Inside ingest, a missing/failed embedder degrades to NULL embeddings with the rows still written — the vector columns are nullable for exactly this reason. `make backfill` repairs ideas, chunks, and domain-keyed entities; a domainless entity has no key to repair on and stays NULL until similarity merge lands.
 - Line length 100, ruff with `E,F,I,UP,B`.
 
@@ -45,6 +52,8 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 
 `make test` creates and migrates `ideacheck_test`, so **migrations are exercised on every run**. Tests drive the app through `httpx.ASGITransport` and explicitly enter `app.router.lifespan_context` — ASGITransport does not run lifespan events, and lifespan is where the graph is built.
 
+**Every request needs credentials.** The `auth` fixture mints a *unique* signed-in identity per test, because the test database is session-scoped and a shared user would carry one test's quota consumption into the next. The `client` fixture also gives each test its own client IP for the same reason.
+
 **Real Postgres, fake model providers.** The "no mocks" convention was about the database, where Phase 1's risk lived; it still holds. Paid third-party HTTP is a different category — `conftest` monkeypatches `app.main.build_clients` to return `FakeResearchClient` / `FakeJudge`. That is also the only way to reach the behaviours that matter most: one researcher down, all four down, a judge citing a source that doesn't exist.
 
 **`make test-live`** (`-m live`) runs the same pipeline against the real APIs. It costs money and is deselected by default. It exists to catch the fakes lying — specifically `extract_citations`, whose shape is currently an assumption. Run it before shipping.
@@ -57,6 +66,18 @@ Accepts an idea, runs the LangGraph pipeline in a bounded background task, persi
 - **`ASGITransport` awaits `BackgroundTasks` inside the POST**, so a report is already finished when the response returns. Tests that need to observe intermediate `step` values must poll concurrently with the request, not after it.
 - **A LangGraph `RetryPolicy` on a research node would be dead config**, because those nodes swallow their own exceptions and never raise. Retry lives inside the node. See `app/graph/CLAUDE.md`.
 - **`PERPLEXITY_CONCURRENCY` is not `MAX_CONCURRENT_RUNS`.** One run makes four Sonar calls, so 5 concurrent runs would mean 20 concurrent vendor requests. They are separate settings on purpose; don't collapse them.
+
+## Gotchas (Phase 4)
+
+- **`POST /reports` gate order is load-bearing**: per-IP cap (in-memory) → `has_budget` advisory read → pre-check (paid Haiku call) → advisory lock → duplicate → `consume` → insert → commit. Two constraints pin it: the *free* checks must precede the paid one, or an exhausted signed-in account can spend indefinitely by retrying (they are exempt from the IP cap); and the *authoritative* claim must come after the duplicate check, or rejected submissions burn credits.
+- **The duplicate check and the insert are one critical section.** `quota.lock_submission` takes a `pg_advisory_xact_lock` keyed on `(user_id, idea)`, held until commit. Without it two concurrent identical submits both read "no duplicate", both consume a credit, and both launch a full research run — verified, and it is exactly what a double-clicked button does.
+- **The refund takes the charged identity as an argument, not the report's owner.** `POST /auth/claim` rewrites `reports.user_id` while a run is in flight, so resolving the owner at failure time credits the account that just claimed the report and leaves the anonymous visitor who paid permanently out of pocket. `run_report` carries `charged_user_id`/`charged_period` for this reason.
+- **`usage_counters.period` is `String(7)`.** Anonymous users are counted under the sentinel `'anon'` instead of `YYYY-MM`, because their id lives in `localStorage` and a monthly period hands out a fresh free run at every month boundary. A *daily* cap would not fit this column without a migration.
+- **The per-IP cap reads `request.client.host`, not `X-Forwarded-For`.** uvicorn's `--proxy-headers` already rewrites `request.client` using the trusted-proxy list; hand-parsing the header means trusting a client-controlled value, and an attacker spoofing a fresh first hop per request defeats the cap entirely. **In production that flag is load-bearing** — without it every visitor shares one bucket and the third one gets a 429.
+- **The IP limiter is an in-memory dict and resets on deploy.** That is the accepted trade: it is a speed bump in front of a wall (the second run needs an account), and one replica makes a shared store unnecessary.
+- **A failed run refunds its credit.** Research is fail-soft, so `status="failed"` almost always means our bug — charging for it is the worst support conversation available. The refund is best-effort and must never replace the original error.
+- **Duplicate detection is per user, never global.** Global dedupe would serve the first founder's report to the second and destroy the "N people pitched this" signal `ideas` exists for. `force: true` is the deliberate re-run escape hatch — `tests/test_corpus.py` depends on it.
+- **The `md5(ideas.text)` index is declared in `models.py` as well as migration 0002.** Without the model-side `Index(...)`, `--autogenerate` proposes dropping it — the same trap as the checkpointer tables. Note `Idea` has a column named `text`, so the helper is imported as `sql_text`.
 
 ## Gotchas (Phase 3)
 

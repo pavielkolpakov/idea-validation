@@ -15,6 +15,14 @@ import pytest
 
 API_DIR = Path(__file__).resolve().parent.parent
 
+
+def _unique_ip() -> str:
+    from uuid import uuid4
+
+    n = uuid4().int
+    return f"10.{n % 251}.{(n >> 8) % 251}.{(n >> 16) % 251}"
+
+
 ADMIN_DSN = "postgresql://ideacheck:ideacheck@localhost:5433/postgres"
 TEST_DB = "ideacheck_test"
 TEST_SQLALCHEMY_URL = f"postgresql+psycopg://ideacheck:ideacheck@localhost:5433/{TEST_DB}"
@@ -67,7 +75,37 @@ def embedder():
 
 
 @pytest.fixture
-async def client(test_database, research_client, judge, embedder, monkeypatch) -> AsyncIterator:
+def verifier():
+    from app.clients.fakes import FakeVerifier
+
+    return FakeVerifier()
+
+
+@pytest.fixture
+def precheck():
+    from app.clients.fakes import FakePrecheck
+
+    return FakePrecheck()
+
+
+@pytest.fixture
+def auth(verifier) -> dict[str, str]:
+    """Headers for a signed-in caller, unique per test.
+
+    Unique on purpose: the test database is session-scoped, so a shared identity
+    would carry one test's quota consumption into the next.
+    """
+    from uuid import uuid4
+
+    token = f"tok-{uuid4()}"
+    verifier.tokens[token] = f"user_{uuid4().hex[:12]}"
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+async def client(
+    test_database, research_client, judge, embedder, verifier, precheck, monkeypatch
+) -> AsyncIterator:
     import httpx
 
     from app.main import app
@@ -79,10 +117,15 @@ async def client(test_database, research_client, judge, embedder, monkeypatch) -
     # Same seam for the embedder; set `embedder.fail = True` to exercise the
     # NULL-embedding path.
     monkeypatch.setattr("app.main.build_embedder", lambda: embedder)
+    # Same seam for identity: the real verifier needs a reachable Clerk JWKS.
+    monkeypatch.setattr("app.main.build_verifier", lambda: verifier)
+    monkeypatch.setattr("app.main.build_precheck", lambda: precheck)
 
     # ASGITransport does not run lifespan events, and lifespan is where the
     # checkpointer and graph are built — so drive it explicitly.
     async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
+        # Unique per test: the per-IP anonymous cap is global state, and
+        # ASGITransport otherwise reports the same client address everywhere.
+        transport = httpx.ASGITransport(app=app, client=(_unique_ip(), 12345))
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             yield c
