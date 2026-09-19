@@ -171,11 +171,21 @@ Key points:
 - **LangSmith tracing verified end to end**: all 8 spans (4 research + judge chain/LLM/parser) close with outputs. Two bugs had to be fixed first, both silent: `.env` was never exported to `os.environ` (so tracing was simply off), and the `perplexityai` SDK's unbuilt `APIPublicSearchResult` schema broke LangSmith serialization, leaving every `ChatPerplexity` span `pending` forever. See `api/CLAUDE.md` → Gotchas.
 - **Frontend untouched.** The report page remains Phase 4.
 
-### Phase 3 — Corpus ingest
-- [ ] OpenAI embedding client (batched).
-- [ ] `ingest` node: ideas + entities (domain upsert) + chunks.
-- [ ] Backfill script for reports produced before ingest landed.
-- [ ] Corpus stats endpoint — proves the asset is accumulating.
+### Phase 3 — Corpus ingest ✅ complete
+- [x] OpenAI embedding client (batched; one call per run via `langchain-openai`).
+- [x] Ingest: ideas + entities (domain upsert) + chunks, all embedded.
+- [x] Backfill script for reports produced before ingest landed (`make backfill`).
+- [x] Corpus stats endpoint (`GET /corpus/stats`) — proves the asset is accumulating.
+
+**Decisions and deviations, and why**
+- **Ingest lives in the runner, not a graph node.** The Phase 2 amendment that dropped `persist` applies unchanged: nodes never touch the database, and the runner already owned `_write_chunks`. `app/corpus.py::ingest_run` is that function grown into full ingest — same best-effort swallow, same "after the report row commits" ordering.
+- **`langchain-openai`**, matching the Phase 2 provider decision (free LangSmith spans). One batched `aembed_documents` call per run covers idea + entities + chunks (~10 texts).
+- **A missing `OPENAI_API_KEY` is not fatal.** Unlike the research/judge keys, embeddings feed a corpus that is best-effort by invariant: `build_embedder()` returns `None` with a startup warning, and rows land with NULL embeddings (the columns are nullable for exactly this). An embedding *failure* mid-run degrades the same way — rows still written, vectors lost, backfillable.
+- **Entity upsert dedupes within the batch first.** Postgres `ON CONFLICT` cannot touch the same row twice in one statement, and the judge can name a company in two dossiers. Domain-less competitors are plain inserts — no dedup story until embedding-similarity merge exists.
+- **Repeat sightings refresh, never erase.** The upsert's `ON CONFLICT` clause bumps `seen_count`/`last_verified_at` and only overwrites `description`/`funding_stage`/`embedding` when the new value is non-NULL.
+- **Backfill is a one-shot migration, not a cron job.** Re-running it against an already-ingested report inflates `seen_count`; that is documented in `app/scripts/backfill.py` rather than defended against with a marker column.
+- **The embedding dimension is pinned in two places.** `OpenAIEmbedder` requests `dimensions=EMBEDDING_DIM` (the 3-series supports reduction, so `text-embedding-3-large` returns 1536), and `corpus._embed` checks the returned length. A wrong-dimension model is a *successful* API call, so it cannot arrive as an embedding failure — unguarded it surfaces at `commit()` and rolls back every row the run was writing, which is the one outcome the best-effort invariant exists to prevent.
+- **Backfill re-embeds every competitor each pass.** Skipping already-embedded entities was tried and reverted: the upsert overwrites `description` on each sighting while coalescing the embedding, so a skipped pass strands the previous description's vector under this pass's text. Cents of spend against silent corpus corruption.
 
 ### Phase 4 — Product surface
 - [ ] Auth provider decision + integration; `X-Debug-User` removed.
@@ -190,5 +200,6 @@ Key points:
 - ~~Chunking strategy for `research_chunks`.~~ **Resolved (Phase 2): whole sub-agent answer as one row.** Matches the dossier shape, so no splitter and no transformation. Per-claim splitting stays available later, when retrieval quality can actually be measured.
 - Judge model tier — defaulted to `claude-opus-5`; still wants the Phase 4 golden-set A/B against `claude-sonnet-5`. Config flip, no code change.
 - When retrieval turns on: HNSW parameters, and how to stop the corpus echoing itself beyond the `source` column.
+- Domainless entities have no dedup key, so they are re-inserted rather than repaired on every backfill pass and their embeddings stay NULL. Folds into the embedding-similarity merge question above — a name-based key was rejected as worse than the gap.
 - Idempotency on duplicate idea submissions — needs a content hash and a "you already ran this" UX.
 - Score weights are a first guess (`SCORE_WEIGHTS`). Retune against the Phase 4 golden set; historical reports can be re-scored from stored subscores for free.

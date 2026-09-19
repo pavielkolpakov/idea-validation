@@ -21,6 +21,7 @@ make migrate   # alembic upgrade head
 make api       # uvicorn on :8000
 make web       # next dev on :3000
 make test      # pytest (creates + migrates ideacheck_test)
+make backfill  # backfill corpus embeddings/entities for pre-Phase-3 reports
 make fmt       # ruff check --fix && ruff format
 make reset     # drop volume, recreate, re-migrate
 ```
@@ -30,7 +31,7 @@ make reset     # drop volume, recreate, re-migrate
 - **Postgres is on host port 5433**, not 5432. A local Homebrew Postgres occupies 5432 and silently shadows the container.
 - **The corpus is write-only in V1.** Do not add retrieval/RAG without an explicit decision — see `PLAN.md`.
 - **`source` (`web` | `corpus`) on `entities` and `research_chunks` is load-bearing.** It exists so corpus-derived claims can never be re-ingested as fresh corroboration once retrieval is on.
-- Phase status lives in `PLAN.md`. Phase 1 is complete; Phase 2 replaces the stub graph node with real research.
+- Phase status lives in `PLAN.md`. Phases 1-3 are complete; Phase 4 is the product surface (auth, SSE, report page).
 
 ## Rule: keep these files current
 

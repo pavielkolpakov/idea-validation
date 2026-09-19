@@ -1,4 +1,4 @@
-.PHONY: up down logs migrate revision api web test test-live fmt reset
+.PHONY: up down logs migrate revision api web backfill test test-live fmt reset
 
 up:
 	docker compose up -d
@@ -29,6 +29,10 @@ api:
 
 web:
 	cd web && npm run dev
+
+# Backfill corpus embeddings/entities for reports written before Phase 3.
+backfill:
+	cd api && uv run python -m app.scripts.backfill
 
 test:
 	cd api && uv run pytest -q -m "not live"
