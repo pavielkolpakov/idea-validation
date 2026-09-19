@@ -1,4 +1,4 @@
-.PHONY: up down logs migrate revision api web backfill test test-live fmt reset
+.PHONY: up down logs migrate revision api web backfill test test-live types fmt reset
 
 up:
 	docker compose up -d
@@ -33,6 +33,13 @@ web:
 # Backfill corpus embeddings/entities for reports written before Phase 3.
 backfill:
 	cd api && uv run python -m app.scripts.backfill
+
+# Regenerate the OpenAPI spec and the frontend types from it. Both outputs are
+# committed: Vercel's build cannot reach the API to generate them, and a spec
+# diff is the most readable review signal that an API contract moved.
+types:
+	cd api && uv run python -m app.scripts.dump_openapi
+	cd web && npx openapi-typescript ../api/openapi.json -o lib/api.gen.ts
 
 test:
 	cd api && uv run pytest -q -m "not live"
