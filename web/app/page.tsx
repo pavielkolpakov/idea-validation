@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { createReport, getReport, TERMINAL, type Report } from "@/lib/api";
+import { ApiError, createReport, getReport, TERMINAL, type Report } from "@/lib/api";
 
 const POLL_MS = 1500;
 
@@ -55,7 +55,9 @@ export default function Home() {
       const created = await createReport(idea);
       setSlug(created.public_slug);
     } catch (e) {
-      setError(String(e));
+      // ApiError's message is already the server's explanation; String() would
+      // bury it behind the class name.
+      setError(e instanceof ApiError ? e.message : String(e));
     } finally {
       setSubmitting(false);
     }

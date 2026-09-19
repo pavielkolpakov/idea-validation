@@ -49,7 +49,7 @@ export class ApiError extends Error {
     readonly status: number,
     readonly body: unknown,
   ) {
-    super(`API error ${status}`);
+    super(explain(status, body));
     this.name = "ApiError";
   }
 
@@ -62,6 +62,23 @@ export class ApiError extends Error {
   get existingSlug(): string | undefined {
     return (this.body as DuplicateError | null)?.existing_slug;
   }
+}
+
+/** A human-readable message for an error response.
+ *
+ * The message has to stay useful on its own, because that is what anything
+ * doing `String(error)` will show. The pre-check's rejection reason arrives as
+ * a plain `detail` string and is the most useful thing we can say; the gates
+ * arrive as a `reason` code, which is at least specific. Deliberately not
+ * polished user-facing copy — the UI reads `.reason` and writes its own. */
+function explain(status: number, body: unknown): string {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") return detail;
+
+  const reason = (body as { reason?: unknown } | null)?.reason;
+  if (typeof reason === "string") return `${reason} (HTTP ${status})`;
+
+  return `HTTP ${status}`;
 }
 
 async function parse<T>(res: Response): Promise<T> {

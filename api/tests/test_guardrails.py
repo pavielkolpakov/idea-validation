@@ -33,8 +33,11 @@ async def test_non_idea_input_is_rejected_before_any_research(
         headers=auth,
     )
     assert resp.status_code == 422
-    assert "product or startup idea" in resp.text
     assert research_client.calls == []
+    # A plain string, not a validation-error list: the frontend surfaces
+    # `detail` verbatim when it is one (see `explain` in web/lib/api.ts), and
+    # this rejection is the most useful thing we can tell the user.
+    assert resp.json()["detail"] == "This does not describe a product or startup idea."
 
 
 async def test_the_idea_reaches_the_judge_as_delimited_data(client, auth, judge):

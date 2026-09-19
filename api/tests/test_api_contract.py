@@ -107,3 +107,59 @@ def test_the_status_union_matches_the_database_constraint():
     from app.schemas import ReportStatus
 
     assert set(get_args(ReportStatus)) == set(REPORT_STATUSES)
+
+
+async def test_a_phase_1_report_still_serves(client, auth):
+    """The exact payload the Phase 1 stub node wrote.
+
+    `risks` and `differentiation` were lists of plain strings back then, not
+    `{text, sources}` objects. This is the concrete case `ReportBody` exists
+    for, and the earlier tolerance test missed it by using an empty list.
+    """
+    from sqlalchemy import update
+
+    from app.db import SessionLocal
+    from app.models import Report
+
+    resp = await client.post("/reports", json={"idea": IDEA}, headers=auth)
+    slug, report_id = resp.json()["public_slug"], resp.json()["id"]
+
+    phase_1 = {
+        "verdict": "Stub report — no research was performed.",
+        "score": 42,
+        "subscores": {
+            "novelty": 40,
+            "market_size": 50,
+            "competitive_intensity": 35,  # renamed to competitive_headroom in Phase 2
+            "timing": 45,
+            "feasibility": 60,
+        },
+        "competitors": [
+            {
+                "name": "Example Corp",
+                "domain": "example.com",
+                "what_they_do": "Placeholder competitor for shape-checking the UI.",
+                "funding_stage": "unknown",
+            }
+        ],
+        "risks": ["This is stub output; the pipeline lands in Phase 2."],
+        "differentiation": ["Replace stub_node with the real fan-out."],
+        "echo": "a truncated copy of the idea",
+    }
+    async with SessionLocal() as session:
+        await session.execute(update(Report).where(Report.id == report_id).values(report=phase_1))
+        await session.commit()
+
+    got = await client.get(f"/reports/{slug}")
+    assert got.status_code == 200, got.text
+
+    body = got.json()["report"]
+    # The strings survive, lifted into the shape the client is generated against.
+    assert body["risks"] == [
+        {"text": "This is stub output; the pipeline lands in Phase 2.", "sources": []}
+    ]
+    assert body["differentiation"][0]["text"] == "Replace stub_node with the real fan-out."
+    assert body["competitors"][0]["name"] == "Example Corp"
+    # A subscore that no longer exists is dropped; the rest keep their values.
+    assert body["subscores"]["novelty"] == 40
+    assert body["subscores"]["competitive_headroom"] == 0

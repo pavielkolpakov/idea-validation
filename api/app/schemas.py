@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.config import get_settings
 
@@ -99,6 +99,21 @@ class ReportBody(BaseModel):
     # Added by the judge node on top of `JudgeReport`.
     degraded_agents: list[str] = Field(default_factory=list)
     citations: list[str] = Field(default_factory=list)
+
+    @field_validator("risks", "differentiation", mode="before")
+    @classmethod
+    def _lift_legacy_strings(cls, value: object) -> object:
+        """Phase 1 wrote these as plain strings, before citations existed.
+
+        Tolerating old rows is this model's whole job, and "the field exists
+        but held a different type" is the most common way a stored shape
+        changes — dropping those rows to a 500 would defeat the point. The
+        string becomes the `text`, with no sources, which is exactly what it
+        meant at the time.
+        """
+        if isinstance(value, list):
+            return [{"text": v, "sources": []} if isinstance(v, str) else v for v in value]
+        return value
 
 
 class ReportResponse(BaseModel):
