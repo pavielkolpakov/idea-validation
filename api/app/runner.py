@@ -11,6 +11,7 @@ import logging
 
 from sqlalchemy import update
 
+from app import quota
 from app.config import get_settings
 from app.corpus import ingest_run
 from app.db import SessionLocal
@@ -122,6 +123,12 @@ async def run_report(report_id: int, idea_id: int, idea: str, target_user: str |
             )
         except Exception as exc:  # noqa: BLE001 — must never escape into BackgroundTasks
             log.exception("report %s failed", report_id)
+            # The user should not pay for our failure. Best-effort, like the
+            # corpus write: a refund that raises must not replace the real error.
+            try:
+                await quota.refund_for_report(report_id)
+            except Exception:  # noqa: BLE001
+                log.exception("quota refund failed for report %s", report_id)
             await _patch(
                 report_id,
                 status="failed",

@@ -13,8 +13,8 @@ import pytest
 IDEA = "A scheduling tool for independent piano teachers and their students."
 
 
-async def _run_report(client, idea: str = IDEA) -> dict:
-    resp = await client.post("/reports", json={"idea": idea}, headers={"X-Debug-User": "test"})
+async def _run_report(client, auth: dict, idea: str = IDEA, force: bool = False) -> dict:
+    resp = await client.post("/reports", json={"idea": idea, "force": force}, headers=auth)
     assert resp.status_code == 202
     slug = resp.json()["public_slug"]
 
@@ -75,10 +75,10 @@ def test_normalize_domain():
     assert normalize_domain(None) is None
 
 
-async def test_ingest_embeds_idea_entities_and_chunks(client, judge, embedder):
+async def test_ingest_embeds_idea_entities_and_chunks(client, judge, embedder, auth):
     judge.domain = _unique_domain()
 
-    body = await _run_report(client)
+    body = await _run_report(client, auth)
     assert body["status"] == "succeeded", body.get("error")
 
     assert await _idea_embedding(body["id"]) is not None
@@ -98,12 +98,15 @@ async def test_ingest_embeds_idea_entities_and_chunks(client, judge, embedder):
     assert sum(len(batch) for batch in embedder.batches) == 6
 
 
-async def test_repeat_sighting_upserts_instead_of_duplicating(client, judge):
+async def test_repeat_sighting_upserts_instead_of_duplicating(client, judge, auth):
     """The domain key is what makes seen_count and last_verified_at meaningful."""
     judge.domain = _unique_domain()
 
-    first = await _run_report(client)
-    second = await _run_report(client)
+    first = await _run_report(client, auth)
+    # Deliberately the same idea again: that is what puts the same company in
+    # front of the upsert twice. `force` is the escape hatch the duplicate
+    # check exists to leave open.
+    second = await _run_report(client, auth, force=True)
     assert first["status"] == second["status"] == "succeeded"
 
     entities = (await _entity_by_domain(judge.domain)).all()
@@ -112,12 +115,12 @@ async def test_repeat_sighting_upserts_instead_of_duplicating(client, judge):
     assert entities[0].last_verified_at >= entities[0].first_seen_at
 
 
-async def test_embedding_failure_still_writes_rows(client, judge, embedder):
+async def test_embedding_failure_still_writes_rows(client, judge, embedder, auth):
     """Best-effort means best-effort: a failed embedder costs vectors, not rows."""
     judge.domain = _unique_domain()
     embedder.fail = True
 
-    body = await _run_report(client)
+    body = await _run_report(client, auth)
     assert body["status"] == "succeeded", body.get("error")
 
     assert await _idea_embedding(body["id"]) is None
@@ -152,11 +155,11 @@ async def test_duplicate_domain_within_one_run_dedupes():
     assert entities[0].seen_count == 1
 
 
-async def test_corpus_stats_endpoint(client, judge):
+async def test_corpus_stats_endpoint(client, judge, auth):
     judge.domain = _unique_domain()
 
     before = (await client.get("/corpus/stats")).json()
-    body = await _run_report(client)
+    body = await _run_report(client, auth)
     assert body["status"] == "succeeded", body.get("error")
     after = (await client.get("/corpus/stats")).json()
 
@@ -168,7 +171,7 @@ async def test_corpus_stats_endpoint(client, judge):
     assert after["research_chunks"]["embedded"] == before["research_chunks"]["embedded"] + 4
 
 
-async def test_wrong_dimension_vectors_degrade_to_null(client, judge, embedder):
+async def test_wrong_dimension_vectors_degrade_to_null(client, judge, embedder, auth):
     """A model whose vectors don't fit the schema costs vectors, not rows.
 
     `text-embedding-3-large` returns 3072 dimensions against 1536-wide columns.
@@ -179,7 +182,7 @@ async def test_wrong_dimension_vectors_degrade_to_null(client, judge, embedder):
     judge.domain = _unique_domain()
     embedder.DIM = 3072
 
-    body = await _run_report(client)
+    body = await _run_report(client, auth)
     assert body["status"] == "succeeded", body.get("error")
 
     assert await _idea_embedding(body["id"]) is None

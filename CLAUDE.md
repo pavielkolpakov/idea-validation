@@ -31,7 +31,9 @@ make reset     # drop volume, recreate, re-migrate
 - **Postgres is on host port 5433**, not 5432. A local Homebrew Postgres occupies 5432 and silently shadows the container.
 - **The corpus is write-only in V1.** Do not add retrieval/RAG without an explicit decision — see `PLAN.md`.
 - **`source` (`web` | `corpus`) on `entities` and `research_chunks` is load-bearing.** It exists so corpus-derived claims can never be re-ingested as fresh corroboration once retrieval is on.
-- Phase status lives in `PLAN.md`. Phases 1-3 are complete; Phase 4 is the product surface (auth, SSE, report page).
+- Phase status lives in `PLAN.md`. Phases 1-3 are complete; Phase 4 is in progress (identity, quota and guardrails are done; report page, SSE, eval and deploy are not).
+- **There is no auth bypass.** Every request carries either a verified Bearer token or an `X-Anon-Id`; the `X-Debug-User` shim is gone. Tests inject a fake verifier — never add a flag that turns authentication off.
+- **Anonymous visitors are ordinary `users` rows** (`external_id = "anon:<uuid>"`). Don't special-case them.
 
 ## Rule: keep these files current
 

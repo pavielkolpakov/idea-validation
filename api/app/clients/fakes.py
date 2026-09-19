@@ -29,9 +29,11 @@ class FakeResearchClient:
         # agent -> seconds to stall, so a test can observe intermediate progress.
         self.delays = delays or {}
         self.calls: list[str] = []
+        self.prompts: list[str] = []
 
     async def research(self, agent: str, prompt: str) -> Dossier:
         self.calls.append(agent)
+        self.prompts.append(prompt)
         if delay := self.delays.get(agent):
             await asyncio.sleep(delay)
         if agent in self.fail_agents:
@@ -55,9 +57,11 @@ class FakeJudge:
         # test DB is session-scoped and entities accumulate across tests.
         self.domain = domain
         self.prompts: list[str] = []
+        self.systems: list[str] = []
 
     async def judge(self, system: str, prompt: str) -> JudgeReport:
         self.prompts.append(prompt)
+        self.systems.append(system)
         return JudgeReport(
             verdict="A plausible but crowded idea with a narrow wedge available.",
             subscores=Subscores(
@@ -104,3 +108,25 @@ class FakeEmbeddingClient:
         seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "big")
         rng = random.Random(seed)
         return [rng.uniform(-1, 1) for _ in range(self.DIM)]
+
+
+class FakeVerifier:
+    """Maps token string -> subject. Anything not in `tokens` fails to verify."""
+
+    def __init__(self, tokens: dict[str, str] | None = None) -> None:
+        self.tokens = tokens or {}
+
+    async def verify(self, token: str) -> str | None:
+        return self.tokens.get(token)
+
+
+class FakePrecheck:
+    """Accepts by default. Set `reject_with` to a reason to fail the gate."""
+
+    def __init__(self, reject_with: str | None = None) -> None:
+        self.reject_with = reject_with
+        self.checked: list[str] = []
+
+    async def check(self, idea: str) -> str | None:
+        self.checked.append(idea)
+        return self.reject_with

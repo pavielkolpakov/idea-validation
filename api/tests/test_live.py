@@ -43,15 +43,23 @@ def live_client(test_database):
     return None
 
 
-async def test_real_pipeline_produces_a_usable_report(live_client, test_database):
+async def test_real_pipeline_produces_a_usable_report(live_client, test_database, monkeypatch):
     import httpx
 
+    from app.clients.fakes import FakeVerifier
     from app.main import app
+
+    # This suite exists to check the *research* contract against the real APIs.
+    # Auth is not part of that, and the real verifier would demand a reachable
+    # Clerk JWKS just to boot — so the run goes in as an anonymous visitor.
+    monkeypatch.setattr("app.main.build_verifier", lambda: FakeVerifier())
 
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test", timeout=600) as c:
-            resp = await c.post("/reports", json={"idea": IDEA}, headers={"X-Debug-User": "live"})
+            resp = await c.post(
+                "/reports", json={"idea": IDEA}, headers={"X-Anon-Id": "live-suite"}
+            )
             assert resp.status_code == 202
             slug = resp.json()["public_slug"]
 

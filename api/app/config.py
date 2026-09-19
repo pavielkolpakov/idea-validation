@@ -54,8 +54,23 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
 
+    # Free quota. The anonymous run is marketing spend; the per-account limit
+    # is the real ceiling.
+    anon_free_runs: int = 1
+    monthly_free_runs: int = 5
+    # The actual ceiling on anonymous traffic: the anon id is forgeable.
+    anon_runs_per_ip: int = 3
+    anon_ip_window_s: float = 86400.0
+
+    # Identity. Fatal when unset (see clients.build_verifier) — unlike the
+    # embedding key, nothing works without it.
+    clerk_jwks_url: str = ""
+    clerk_issuer: str = ""
+
     sonar_model: str = "sonar-pro"
     judge_model: str = "claude-opus-5"
+    # Cheap gate in front of the expensive pipeline.
+    precheck_model: str = "claude-haiku-4-5"
 
     # Deliberately not max_concurrent_runs: that bounds *reports* in flight, a
     # UX/pool concern. This bounds concurrent requests to Perplexity, a vendor

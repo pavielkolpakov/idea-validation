@@ -22,13 +22,29 @@ export interface CreatedReport {
 
 export const TERMINAL: ReportStatus[] = ["succeeded", "failed"];
 
+const ANON_KEY = "ideacheck-anon-id";
+
+/** The anonymous visitor's id, minted once per browser.
+ *
+ * A dedupe key, not a ceiling — the server pairs it with a per-IP cap, because
+ * this header is trivially forgeable. Bearer tokens arrive in Slice 3 with
+ * Clerk; until then every caller is anonymous and gets one free run. */
+function anonId(): string {
+  let id = localStorage.getItem(ANON_KEY);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(ANON_KEY, id);
+  }
+  return id;
+}
+
 export async function createReport(
   idea: string,
   targetUser?: string,
 ): Promise<CreatedReport> {
   const res = await fetch(`${API_URL}/reports`, {
     method: "POST",
-    headers: { "content-type": "application/json", "X-Debug-User": "dev" },
+    headers: { "content-type": "application/json", "X-Anon-Id": anonId() },
     body: JSON.stringify({ idea, target_user: targetUser || null }),
   });
   if (!res.ok) {

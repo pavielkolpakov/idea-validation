@@ -11,17 +11,25 @@ eagerly at app startup and would need live API keys otherwise.
 from app.clients.embeddings import EmbeddingClient, OpenAIEmbedder
 from app.clients.judge import AnthropicJudge, JudgeClient
 from app.clients.perplexity import Dossier, PerplexityClient, ResearchClient
+from app.clients.precheck import AnthropicPrecheck, PrecheckClient
+from app.clients.verifier import ClerkVerifier, TokenVerifier
 
 __all__ = [
     "AnthropicJudge",
+    "ClerkVerifier",
     "Dossier",
     "EmbeddingClient",
     "JudgeClient",
     "OpenAIEmbedder",
+    "AnthropicPrecheck",
     "PerplexityClient",
+    "PrecheckClient",
     "ResearchClient",
+    "TokenVerifier",
     "build_clients",
     "build_embedder",
+    "build_precheck",
+    "build_verifier",
 ]
 
 
@@ -72,3 +80,25 @@ def build_embedder() -> EmbeddingClient | None:
         )
         return None
     return OpenAIEmbedder()
+
+
+def build_verifier() -> TokenVerifier:
+    """Construct the real token verifier, failing fast if it can't work.
+
+    Fatal like `build_clients`, not optional like `build_embedder`: without a
+    JWKS URL nobody can sign in, and booting into that state would look healthy
+    while rejecting every authenticated request.
+    """
+    from app.config import get_settings
+
+    if not get_settings().clerk_jwks_url.strip():
+        raise RuntimeError(
+            "CLERK_JWKS_URL is not set. Tests do not need it — the default suite "
+            "runs on a fake verifier via `make test`."
+        )
+    return ClerkVerifier()
+
+
+def build_precheck() -> PrecheckClient:
+    """The pre-check runs on the same Anthropic key as the judge."""
+    return AnthropicPrecheck()

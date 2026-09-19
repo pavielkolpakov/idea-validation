@@ -42,8 +42,8 @@ Target user: solo founders and indie hackers deciding whether to build.
 | Concurrency | `asyncio.Semaphore`, default 5 | Bounded in-process runs; excess reports wait in `queued`. The seam the Postgres queue later replaces |
 
 ## Still Open
-- **Hosting provider** — deferrable; local docker-compose unblocks Phases 1-3.
-- **Auth provider** — decide in Phase 4 when org/social-login needs are known.
+- **Hosting provider** — **decided: Railway, single replica** (keeps `BackgroundTasks`, the semaphore and in-process streaming valid); not yet deployed.
+- ~~**Auth provider**~~ — **Resolved (Phase 4): Clerk.** The discriminating requirement was that FastAPI verify identity by itself; Auth.js keeps the session in Next and would force either a proxy in front of the API (extra hop, breaks direct SSE) or hand-rolled JWT signing.
 - Judge model tier (`claude-opus-5` vs `claude-sonnet-5`) — shipped as Opus via `JUDGE_MODEL`; A/B on the golden set.
 - Research topology: fixed 4 sub-agents vs planner-driven `Send` fan-out — shipped fixed 4.
 
@@ -187,13 +187,35 @@ Key points:
 - **The embedding dimension is pinned in two places.** `OpenAIEmbedder` requests `dimensions=EMBEDDING_DIM` (the 3-series supports reduction, so `text-embedding-3-large` returns 1536), and `corpus._embed` checks the returned length. A wrong-dimension model is a *successful* API call, so it cannot arrive as an embedding failure — unguarded it surfaces at `commit()` and rolls back every row the run was writing, which is the one outcome the best-effort invariant exists to prevent.
 - **Backfill re-embeds every competitor each pass.** Skipping already-embedded entities was tried and reverted: the upsert overwrites `description` on each sighting while coalescing the embedding, so a skipped pass strands the previous description's vector under this pass's text. Cents of spend against silent corpus corruption.
 
-### Phase 4 — Product surface
-- [ ] Auth provider decision + integration; `X-Debug-User` removed.
-- [ ] Hosting decision + deploy.
+### Phase 4 — Product surface (in progress)
+
+**Slice 1 — identity, quota, guardrails ✅ complete**
+- [x] Auth provider decision: **Clerk**. `TokenVerifier` protocol + `ClerkVerifier` (JWKS, RS256); `X-Debug-User` removed.
+- [x] Anonymous identity: client-minted uuid in `X-Anon-Id` → an ordinary `users` row (`external_id = "anon:<uuid>"`).
+- [x] `POST /auth/claim` — moves an anonymous visitor's reports onto their new account.
+- [x] Quota: atomic conditional upsert at submit, refund on `failed`, in-memory per-IP cap on anonymous runs.
+- [x] Input guardrails: Haiku pre-check (spend) + `<idea>` fenced user-data blocks (injection).
+- [x] Per-user duplicate detection with a `force` escape hatch; migration 0002 (`md5(ideas.text)` index).
+- [x] `GET /reports` history, pulled forward from Slice 2 so the claim is verifiable through the public interface.
+
+**Remaining**
+- [ ] Tolerant `ReportBody` response model + OpenAPI type codegen (`web/lib/api.gen.ts`, committed).
+- [ ] Report page (RSC shell + client view), share links, Clerk on the frontend.
 - [ ] SSE progress streaming, replacing polling.
-- [ ] Report page, history, public share links; OpenAPI type codegen.
-- [ ] Quota enforcement, input guardrails, prompt caching on the judge rubric.
-- [ ] Golden-set eval: ~15 ideas with known outcomes, check score ordering is sane.
+- [ ] Golden-set eval: ~15 ideas with known outcomes, judge-only over frozen dossiers.
+- [ ] Hosting decision + deploy; lifespan sweep-and-resume for runs orphaned by a restart.
+
+**Decisions and deviations, and why**
+- **Anonymous visitors get one free run**, then a sign-in wall. They are stored as ordinary `users` rows, which is why ownership, quota, history and the claim all work with no schema change.
+- **The anon id is a dedupe key, not a ceiling.** `X-Anon-Id` is forgeable by `curl`, so the real limit is a per-IP cap. It reads `request.client.host` rather than parsing `X-Forwarded-For` — uvicorn's `--proxy-headers` already applies the trusted-proxy list, and hand-parsing means trusting a client-controlled value that an attacker can vary per request. **That flag is load-bearing in production.**
+- **Anonymous quota is counted under the sentinel period `'anon'`**, not `YYYY-MM`. The id lives in `localStorage` and survives the month rollover, so a monthly period would hand out a fresh free run every January. `usage_counters.period` is `String(7)`, which the sentinel fits — a *daily* cap would not.
+- **The quota check and increment are one statement.** `SELECT` then `UPDATE` races a double-clicked submit, and losing that race costs a real Opus call.
+- **A failed run refunds its credit.** Research is fail-soft, so `failed` almost always means our bug.
+- **No `DEV_AUTH` bypass exists.** Tests inject a fake verifier through the same seam as the model clients. An env var that disables auth is one misconfiguration from an open API, and it fails silently because everything keeps working.
+- **Duplicate detection is per user, never global.** Global dedupe would serve the first founder's report to the second and destroy the "N people pitched this" signal `ideas` exists for. `force: true` keeps the deliberate re-run available.
+- **The `md5(ideas.text)` index is declared in `models.py` as well as the migration** — without it `--autogenerate` proposes dropping the index, the same trap the checkpointer tables have.
+- **Prompt caching on the judge rubric was cut, on measurement.** `JUDGE_SYSTEM` is ~335 tokens against Claude Opus 5's 512-token minimum; even counting the structured-output tool schema, under 10% of a judge request is cacheable while four unique dossiers make up the rest. At this traffic the 5-minute TTL means writes (1.25×) with almost no reads — a surcharge, not a saving. Revisit as an eval-harness concern, where fixed dossiers are the reusable prefix.
+- **Deploy is last, by choice.** The hedge is writing the Dockerfile/Railway config early and pointing the local app at a managed Postgres once, so pgvector, SSL and pool sizing are proven before Clerk and SSE are in the mix.
 
 ## Open Questions
 - ~~Sonar tier: `sonar` vs `sonar-pro`.~~ **Resolved (Phase 2): `sonar-pro`**, config-driven via `SONAR_MODEL`. Developing against the cheap tier can't distinguish "the idea doesn't work" from "the research was underpowered"; downgrading later is a `.env` edit. Revisit per-node tiers once real outputs have been read.
@@ -201,5 +223,5 @@ Key points:
 - Judge model tier — defaulted to `claude-opus-5`; still wants the Phase 4 golden-set A/B against `claude-sonnet-5`. Config flip, no code change.
 - When retrieval turns on: HNSW parameters, and how to stop the corpus echoing itself beyond the `source` column.
 - Domainless entities have no dedup key, so they are re-inserted rather than repaired on every backfill pass and their embeddings stay NULL. Folds into the embedding-similarity merge question above — a name-based key was rejected as worse than the gap.
-- Idempotency on duplicate idea submissions — needs a content hash and a "you already ran this" UX.
+- ~~Idempotency on duplicate idea submissions.~~ **Resolved (Phase 4): per-user, 7-day window**, `409` with the existing slug and a `force` flag to re-run. Deliberately not global — see the Phase 4 notes.
 - Score weights are a first guess (`SCORE_WEIGHTS`). Retune against the Phase 4 golden set; historical reports can be re-scored from stored subscores for free.
