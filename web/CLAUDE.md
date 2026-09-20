@@ -2,35 +2,83 @@
 
 # web/ — Next.js frontend
 
-Next.js 16, App Router, TypeScript, Tailwind. Dev server on :3000; talks to the API on :8000.
+Next.js 16 App Router, React 19, TypeScript, Tailwind v4, Clerk, and Phosphor icons. Read the relevant Next guide under `node_modules/next/dist/docs/` before changing framework code.
 
-> The `@AGENTS.md` import above is from `create-next-app` and matters: **this Next version has breaking changes versus older conventions.** Read the relevant guide under `node_modules/next/dist/docs/` before writing framework code.
+## Structure
 
-## Files
+- `app/page.tsx`: picks one of two pages off `signedIn` — the marketing landing, or the workspace (idea composer, optional audience, draft preservation, submission gates, recent history).
+- `components/landing.tsx`: the signed-out sections below the hero — feature cards, steps, FAQ, closing CTA.
+- `app/reports/page.tsx`: history, local search and status filters (latest 100 reports).
+- `app/reports/[slug]/page.tsx` and `components/report-view.tsx`: public report, polling, scores, citations, sharing and JSON download.
+- `app/research/page.tsx`: corpus totals, embedding counts and service health.
+- `components/providers.tsx`: Clerk identity, anonymous fallback, history and report claiming.
+- `components/shell.tsx`: the marketing frame when signed out, the workspace sidebar once signed in.
+- `components/seed-hero.tsx`: centred hero — copy, two CTAs, then the full-width `SeedMotion` diagram. **Signed-out only.**
+- `app/globals.css`: design tokens, light theme and responsive layouts (see **Design system** below).
+- `lib/api.ts`: all HTTP requests, credential headers, error translation and safe source URLs.
+- `lib/api.gen.ts`: generated from `api/openapi.json` by `make types`; do not edit by hand.
 
-| Path | Role |
-|---|---|
-| `app/page.tsx` | The only real page. Submit an idea, poll, dump raw JSON |
-| `lib/api.ts` | Hand-written fetch helpers + `ApiError`. All API access goes through here |
-| `lib/api.gen.ts` | **Generated — do not edit.** `make types` rebuilds it from `api/openapi.json` |
-| `.env.local` | `NEXT_PUBLIC_API_URL` (defaults to `http://localhost:8000`) |
+## Design system
 
-## State of play
+Palette and shape are derived from Monad (`monad.com`); **typography is not** —
+headings and body stay on Geist Sans at the original weights and tracking.
 
-**The API now rejects unauthenticated requests** (`401`), so `lib/api.ts` sends an anonymous id. The page itself is still the Phase 1 page — the report view, history and SSE are Slice 3/4 of Phase 4.
+Tokens live in `:root` in `app/globals.css` — use them instead of new literals:
 
-**Phase 1 UI is deliberately unstyled and deliberately dumb.** Its only jobs are proving the 202-plus-poll contract works from a browser and surfacing CORS problems early. Real report rendering waits for Phase 2, when the judge schema stops changing daily — don't invest in visual design against a schema that's still moving.
+| Token | Value | Use |
+|---|---|---|
+| `--background` | `#f6f3f1` | Parchment page canvas |
+| `--paper` | `#fffdfc` | Cards and panels |
+| `--foreground` / `--ink` | `#242424` | Off-Black text |
+| `--muted` | `#4e4d4d` | Graphite secondary text |
+| `--border` | `#cecac8` | Ash hairline on cards and controls |
+| `--line` | `#dfdad7` | Internal rules and row dividers |
+| `--wash` | `#efebe8` | Tinted surfaces |
+| `--accent` | `#41734a` | The single accent, in place of Monad's Lake Blue |
+| `--radius` / `--radius-sm` / `--pill` | `40px` / `20px` / `100px` | Cards / inputs / buttons and tags |
 
-## Conventions
+Conventions:
 
-- The API returns **202 + a `public_slug`**, then the client polls `GET /reports/{slug}` every 1.5s until `status` is `succeeded` or `failed` (`TERMINAL` in `lib/api.ts`). Phase 4 replaces polling with SSE.
-- **`X-Anon-Id` is sent by `lib/api.ts`** — a uuid minted once per browser and kept in `localStorage`. The server resolves it to an ordinary `users` row and grants it **one** free run; after that the API returns `429 {"reason": "anon_quota"}` and the UI is expected to ask for a sign-in. Clerk and `Authorization: Bearer` land in Slice 3, along with the one-time `POST /auth/claim` that moves the anonymous report onto the new account.
-- **Types are generated, helpers are not.** `lib/api.gen.ts` comes from the backend's OpenAPI spec via `make types` and is committed (Vercel's build can't reach the API). `lib/api.ts` re-exports the useful names and keeps the fetch wrappers hand-written — the interesting part is the credential headers, and a generated client would bury them in middleware. After changing `api/app/schemas.py` or a route, run `make types` and commit both outputs.
-- **Gate failures carry a `reason`.** `createReport` throws `ApiError`, which keeps the parsed body: `reason` is `anon_quota` | `user_quota` | `ip_rate` | `duplicate`, and a duplicate also carries `existingSlug`. These are the branches the UI is built on — don't collapse them into a generic error string.
-- **`ApiError.message` is already the useful text.** `explain()` prefers the server's `detail` string (a pre-check rejection), then the gate `reason` code, then the status. Render `e.message`, not `String(e)` — the latter prefixes the class name and buries it.
-- **No JS test runner here yet.** `npx tsc --noEmit` is the only automated check on this package; anything behavioural is verified in a browser. Worth revisiting when the report page lands.
-- Typecheck with `npx tsc --noEmit`.
+- **Cards use a 1px `--border` hairline, never a shadow.**
+- Only one primary (green) button per screen; everything else is a transparent
+  pill with an Ash border.
+- The hero follows Monad's layout: centred eyebrow, headline and subcopy, two
+  centred CTAs, then the diagram full width beneath. `.seed-hero-wash` is the
+  soft blurred gradient behind it — decorative pastels live there and in the SVG
+  diagram, never in functional UI.
 
-## Known noise
+`components/seed-motion.tsx` holds three motion directions, previewable at
+`/design/seed-motion`. **The hero is locked to `engine` ("Growth engine")**; the
+other two are kept for that review page only.
 
-`npm audit` reports high-severity issues in transitive deps of Next 16.2.12 (postcss, sharp). npm's only proposed fix is downgrading to `next@9.3.3`, which is nonsense — there is nothing actionable. Don't run `npm audit fix --force`.
+## Access
+
+**There is no anonymous workspace in the UI.** Signed-out visitors get the
+marketing frame — no sidebar, no composer, no history — and every call to action
+opens Clerk's sign-in modal. The composer, the examples and the recent-reports
+list render only once `useIdentity().signedIn` is true. The backend's anonymous
+identity and its one-report quota still exist and public report links still
+resolve for anyone; nothing in the UI creates an anonymous run any more.
+
+**The two states are different pages, not one page with extras.** Signed out is
+the pitch: hero, then `<Landing />`. Signed in, the pitch is over — the hero and
+the marketing sections are gone entirely and the page opens on the composer
+under a short `.intro` heading. Don't reintroduce the hero for signed-in users.
+
+The landing's cards carry mock report fragments (`.mock-chips`, `.mock-rows`,
+`.mock-score`, `.mock-sources`) — **illustrative constants in `landing.tsx`, not
+live data.** Reveal-on-scroll uses `animation-timeline: view()` behind an
+`@supports` guard, so browsers without it simply render the cards; the global
+`prefers-reduced-motion` rule turns it off.
+
+## API behavior
+
+The API returns `202 + public_slug`. Poll `GET /reports/{slug}` every 1.5 seconds until `succeeded` or `failed`; there is no SSE endpoint in this version. Public report reads need no authentication and omit the original idea text. The owner's history provides a 200-character idea preview.
+
+Guest identity is a UUID stored as `ideacheck-anon-id` in localStorage and sent in `X-Anon-Id`. Clerk sessions provide `Authorization: Bearer` tokens. The client gets a fresh token for each authenticated operation. After sign-in, `POST /auth/claim` transfers guest reports; failures expose a retry. Use the publishable key for the same Clerk instance as the backend. No frontend secret key is required.
+
+Submission gates are distinct: `anon_quota`, `user_quota`, `ip_rate`, and `duplicate`. A duplicate includes `existing_slug` and can be retried with `force: true`. Precheck rejection text is shown directly. Treat report citations as zero-based indices and display them as one-based source numbers; only HTTP(S) source links are clickable.
+
+## Verification
+
+`npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build`. Node 22.7+ is needed for the built-in test runner's TypeScript transformation. `npm run test:fixtures` serves local UI test data on port 8001; see README for browser verification and restoring the real API. Fixtures do not call model providers or write to the database.

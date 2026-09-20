@@ -19,6 +19,7 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "langchain-openai>=1.4.2",
     "pyjwt[crypto]>=2.10",
+    "certifi>=2024.2.2",
 ]
 
 [dependency-groups]

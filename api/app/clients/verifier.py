@@ -27,14 +27,24 @@ class ClerkVerifier:
     """Verifies an RS256 JWT against Clerk's JWKS endpoint."""
 
     def __init__(self, jwks_url: str | None = None, issuer: str | None = None) -> None:
+        import ssl
+
+        import certifi
         import jwt
 
         from app.config import get_settings
 
         settings = get_settings()
         self._issuer = issuer or settings.clerk_issuer or None
-        # PyJWKClient caches keys, so the JWKS fetch is once per key rotation.
-        self._jwks = jwt.PyJWKClient(jwks_url or settings.clerk_jwks_url, cache_keys=True)
+        # Trust certifi's bundle rather than the interpreter's. A CPython build
+        # with no CA store (the python.org installer, until its certificate
+        # script is run) fails the JWKS fetch, and because any failure here is
+        # "not authenticated", every signed-in request 401s with no clue why.
+        self._jwks = jwt.PyJWKClient(
+            jwks_url or settings.clerk_jwks_url,
+            cache_keys=True,
+            ssl_context=ssl.create_default_context(cafile=certifi.where()),
+        )
 
     def _verify_sync(self, token: str) -> str | None:
         import jwt
@@ -50,7 +60,10 @@ class ClerkVerifier:
                 options={"verify_aud": False},
             )
         except Exception as exc:  # noqa: BLE001 — any failure is "not authenticated"
-            log.info("token verification failed: %s", exc)
+            # Warning, not info: a misconfigured JWKS url or a missing CA bundle
+            # fails every token identically, and at info this is invisible under
+            # the default log level while the UI only says "not authenticated".
+            log.warning("token verification failed: %s", exc)
             return None
         return claims.get("sub")
 
